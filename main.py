@@ -2,7 +2,6 @@ import os
 import json
 import uuid
 import logging
-from io import StringIO
 from datetime import datetime
 
 import gspread
@@ -27,13 +26,16 @@ from oauth2client.service_account import ServiceAccountCredentials
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# =========================
+# =========================================================
 # ENV
-# =========================
+# =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").replace("@", "").strip()
 SPREADSHEET_URL = os.getenv("SPREADSHEET_URL", "").strip()
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
+CONTACT_PHONE = os.getenv("CONTACT_PHONE", "+998999997973").strip()
+AGENT_SECRET_CODE = os.getenv("AGENT_SECRET_CODE", "GK2026").strip()
+
 ADMIN_IDS = [
     int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()
 ]
@@ -47,18 +49,18 @@ if not SPREADSHEET_URL:
 if not GOOGLE_CREDENTIALS_JSON:
     raise ValueError("GOOGLE_CREDENTIALS_JSON topilmadi")
 
-# =========================
+# =========================================================
 # BOT
-# =========================
+# =========================================================
 bot = Bot(
     token=BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 dp = Dispatcher(storage=MemoryStorage())
 
-# =========================
+# =========================================================
 # GOOGLE SHEETS
-# =========================
+# =========================================================
 scope = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive",
@@ -69,27 +71,37 @@ creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 gc = gspread.authorize(creds)
 sh = gc.open_by_url(SPREADSHEET_URL)
 
-ws_agents = sh.worksheet("Agents")
-ws_special_agents = sh.worksheet("SpecialAgents")
-ws_clients = sh.worksheet("Clients")
-ws_leads = sh.worksheet("Leads")
+# =========================================================
+# SHEET HEADERS
+# =========================================================
+AGENTS_HEADERS = [
+    "agent_id", "full_name", "phone", "telegram_id", "username", "is_active", "created_at"
+]
 
-# =========================
-# FSM
-# =========================
-class ClientFlow(StatesGroup):
-    waiting_name = State()
-    waiting_phone = State()
-    waiting_service = State()
-    waiting_note = State()
+SPECIAL_AGENTS_HEADERS = [
+    "agent_code", "full_name", "phone", "telegram_id", "username", "ref_link", "created_at", "is_active"
+]
 
-class SpecialAgentFlow(StatesGroup):
-    waiting_name = State()
-    waiting_phone = State()
+CLIENTS_HEADERS = [
+    "client_id", "full_name", "phone", "telegram_id", "username",
+    "ref_agent_code", "ref_agent_name", "ref_agent_telegram_id", "created_at"
+]
 
-# =========================
+LEADS_HEADERS = [
+    "lead_id", "client_id", "client_name", "client_phone", "client_telegram_id", "username",
+    "service_type", "note", "status",
+    "taken_by", "taken_by_name", "taken_at",
+    "rejected_by", "rejected_by_name", "rejected_at",
+    "done_by", "done_by_name", "done_at",
+    "ref_agent_code", "ref_agent_name", "ref_agent_telegram_id",
+    "created_at", "agent_message_refs"
+]
+
+SETTINGS_HEADERS = ["key", "value"]
+
+# =========================================================
 # HELPERS
-# =========================
+# =========================================================
 def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -108,15 +120,18 @@ def safe_json_loads(value):
         return []
 
 def normalize_phone(phone: str) -> str:
-    phone = phone.strip().replace(" ", "").replace("-", "")
-    if phone.startswith("+"):
-        return phone
-    if phone.startswith("998"):
-        return f"+{phone}"
-    return phone
+    raw = safe_str(phone).strip()
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if digits.startswith("998") and len(digits) == 12:
+        return f"+{digits}"
+    if len(digits) == 9:
+        return f"+998{digits}"
+    if raw.startswith("+"):
+        return raw
+    return raw
 
 def parse_start_ref(text: str):
-    parts = text.strip().split()
+    parts = safe_str(text).strip().split()
     if len(parts) > 1 and parts[1].startswith("ref_"):
         return parts[1].replace("ref_", "", 1)
     return None
@@ -127,6 +142,80 @@ def build_ref_link(agent_code: str) -> str:
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
+def ensure_worksheet(name: str, headers: list[str], rows: int = 1000, cols: int = 30):
+    try:
+        ws = sh.worksheet(name)
+    except Exception:
+        ws = sh.add_worksheet(title=name, rows=rows, cols=cols)
+
+    existing_headers = ws.row_values(1)
+    if existing_headers != headers:
+        ws.resize(rows=max(rows, 1000), cols=max(cols, len(headers) + 5))
+        ws.update("A1", [headers])
+
+    return ws
+
+ws_agents = ensure_worksheet("Agents", AGENTS_HEADERS)
+ws_special_agents = ensure_worksheet("SpecialAgents", SPECIAL_AGENTS_HEADERS)
+ws_clients = ensure_worksheet("Clients", CLIENTS_HEADERS)
+ws_leads = ensure_worksheet("Leads", LEADS_HEADERS)
+ws_settings = ensure_worksheet("Settings", SETTINGS_HEADERS)
+
+def get_all_records(ws):
+    return ws.get_all_records()
+
+def append_row_safe(ws, row: list):
+    ws.append_row(row, value_input_option="USER_ENTERED")
+
+def find_row_by_value(ws, col_name: str, value: str):
+    headers = ws.row_values(1)
+    if col_name not in headers:
+        return None
+    col_index = headers.index(col_name) + 1
+    col_values = ws.col_values(col_index)
+    for i, v in enumerate(col_values[1:], start=2):
+        if safe_str(v).strip() == safe_str(value).strip():
+            return i
+    return None
+
+def row_to_dict(ws, row_number: int):
+    headers = ws.row_values(1)
+    row_values = ws.row_values(row_number)
+    data = {}
+    for i, h in enumerate(headers):
+        data[h] = row_values[i] if i < len(row_values) else ""
+    return data
+
+def update_fields_by_row(ws, row_number: int, fields: dict):
+    headers = ws.row_values(1)
+    for key, value in fields.items():
+        if key in headers:
+            col = headers.index(key) + 1
+            ws.update_cell(row_number, col, value)
+
+def update_by_id(ws, id_col: str, id_value: str, fields: dict):
+    row = find_row_by_value(ws, id_col, id_value)
+    if not row:
+        return False
+    update_fields_by_row(ws, row, fields)
+    return True
+
+def get_by_id(ws, id_col: str, id_value: str):
+    row = find_row_by_value(ws, id_col, id_value)
+    if not row:
+        return None
+    return row_to_dict(ws, row)
+
+def get_setting(key: str, default: str = "") -> str:
+    records = get_all_records(ws_settings)
+    for r in records:
+        if safe_str(r.get("key")).strip() == key:
+            return safe_str(r.get("value")).strip()
+    return default
+
+# =========================================================
+# MENUS
+# =========================================================
 def main_menu():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -178,72 +267,117 @@ def lead_owner_kb(lead_id: str) -> InlineKeyboardMarkup:
         ]
     )
 
-# =========================
-# SHEETS READ/WRITE
-# =========================
-def get_all_records(ws):
-    return ws.get_all_records()
+# =========================================================
+# FSM
+# =========================================================
+class ClientFlow(StatesGroup):
+    waiting_name = State()
+    waiting_phone = State()
+    waiting_service = State()
+    waiting_note = State()
 
-def append_row_safe(ws, row: list):
-    ws.append_row(row, value_input_option="USER_ENTERED")
+class SpecialAgentFlow(StatesGroup):
+    waiting_name = State()
+    waiting_phone = State()
 
-def find_row_by_value(ws, col_name: str, value: str):
-    headers = ws.row_values(1)
-    if col_name not in headers:
-        return None
-    col_index = headers.index(col_name) + 1
-    col_values = ws.col_values(col_index)
-    for i, v in enumerate(col_values[1:], start=2):
-        if safe_str(v).strip() == safe_str(value).strip():
-            return i
-    return None
-
-def row_to_dict(ws, row_number: int):
-    headers = ws.row_values(1)
-    row_values = ws.row_values(row_number)
-    data = {}
-    for i, h in enumerate(headers):
-        data[h] = row_values[i] if i < len(row_values) else ""
-    return data
-
-def update_fields_by_row(ws, row_number: int, fields: dict):
-    headers = ws.row_values(1)
-    for key, value in fields.items():
-        if key in headers:
-            col = headers.index(key) + 1
-            ws.update_cell(row_number, col, value)
-
-def update_by_id(ws, id_col: str, id_value: str, fields: dict):
-    row = find_row_by_value(ws, id_col, id_value)
-    if not row:
-        return False
-    update_fields_by_row(ws, row, fields)
-    return True
-
-def get_by_id(ws, id_col: str, id_value: str):
-    row = find_row_by_value(ws, id_col, id_value)
-    if not row:
-        return None
-    return row_to_dict(ws, row)
-
-# =========================
+# =========================================================
 # AGENTS
-# =========================
+# =========================================================
 def get_active_agents():
     records = get_all_records(ws_agents)
     result = []
+
     for r in records:
-        if safe_str(r.get("is_active")).lower() in ("1", "true", "yes", "ha"):
-            tg = safe_str(r.get("telegram_id")).strip()
-            if tg.isdigit():
-                result.append({
-                    "telegram_id": int(tg),
-                    "full_name": safe_str(r.get("full_name")),
-                    "phone": safe_str(r.get("phone")),
-                    "agent_id": safe_str(r.get("agent_id")),
-                })
+        is_active = safe_str(r.get("is_active")).strip().lower()
+        telegram_id = safe_str(r.get("telegram_id")).strip()
+
+        if is_active in ("1", "true", "yes", "ha") and telegram_id.isdigit():
+            result.append({
+                "telegram_id": int(telegram_id),
+                "full_name": safe_str(r.get("full_name")),
+                "phone": safe_str(r.get("phone")),
+                "agent_id": safe_str(r.get("agent_id")),
+                "username": safe_str(r.get("username")),
+            })
+
+    logger.info(f"get_active_agents result: {result}")
     return result
 
+def get_agent_by_telegram_id(telegram_id: int):
+    records = get_all_records(ws_agents)
+    for r in records:
+        if safe_str(r.get("telegram_id")).strip() == str(telegram_id):
+            return r
+    return None
+
+def upsert_existing_agent_profile(user):
+    """
+    Agar foydalanuvchi oldindan agent bo'lsa, /start da ma'lumoti avtomatik yangilanadi.
+    Yangi agent yaratmaydi. Faqat mavjud agent profilini sync qiladi.
+    """
+    existing_row = find_row_by_value(ws_agents, "telegram_id", str(user.id))
+    if not existing_row:
+        return False
+
+    current = row_to_dict(ws_agents, existing_row)
+    created_at = safe_str(current.get("created_at")) or now_str()
+
+    update_fields_by_row(ws_agents, existing_row, {
+        "full_name": user.full_name,
+        "username": safe_str(user.username),
+        "telegram_id": str(user.id),
+        "created_at": created_at,
+    })
+    return True
+
+def register_agent_by_secret(user):
+    existing = get_agent_by_telegram_id(user.id)
+    if existing:
+        row = find_row_by_value(ws_agents, "telegram_id", str(user.id))
+        if row:
+            update_fields_by_row(ws_agents, row, {
+                "full_name": user.full_name,
+                "username": safe_str(user.username),
+                "is_active": "TRUE",
+            })
+        return "exists"
+
+    records = get_all_records(ws_agents)
+    append_row_safe(ws_agents, [
+        f"A{len(records) + 1}",
+        user.full_name,
+        "",
+        str(user.id),
+        safe_str(user.username),
+        "TRUE",
+        now_str(),
+    ])
+    return "created"
+
+def approve_agent_by_admin(target_telegram_id: str):
+    if not target_telegram_id.isdigit():
+        return "bad_id"
+
+    existing_row = find_row_by_value(ws_agents, "telegram_id", target_telegram_id)
+    if existing_row:
+        update_fields_by_row(ws_agents, existing_row, {"is_active": "TRUE"})
+        return "updated"
+
+    records = get_all_records(ws_agents)
+    append_row_safe(ws_agents, [
+        f"A{len(records) + 1}",
+        "",
+        "",
+        target_telegram_id,
+        "",
+        "TRUE",
+        now_str(),
+    ])
+    return "created"
+
+# =========================================================
+# SPECIAL AGENTS
+# =========================================================
 def get_special_agent_by_code(agent_code: str):
     records = get_all_records(ws_special_agents)
     for r in records:
@@ -251,9 +385,42 @@ def get_special_agent_by_code(agent_code: str):
             return r
     return None
 
+def get_special_agent_by_telegram_id(telegram_id: int):
+    records = get_all_records(ws_special_agents)
+    for r in records:
+        if safe_str(r.get("telegram_id")).strip() == str(telegram_id):
+            return r
+    return None
+
 def save_special_agent(full_name: str, phone: str, telegram_id: int, username: str):
+    existing = get_special_agent_by_telegram_id(telegram_id)
+
+    if existing:
+        row = find_row_by_value(ws_special_agents, "telegram_id", str(telegram_id))
+        agent_code = safe_str(existing.get("agent_code")) or uuid.uuid4().hex[:8].upper()
+        ref_link = build_ref_link(agent_code)
+
+        update_fields_by_row(ws_special_agents, row, {
+            "agent_code": agent_code,
+            "full_name": full_name,
+            "phone": phone,
+            "telegram_id": str(telegram_id),
+            "username": username,
+            "ref_link": ref_link,
+            "is_active": "TRUE",
+        })
+        return {
+            "agent_code": agent_code,
+            "ref_link": ref_link,
+            "full_name": full_name,
+            "phone": phone,
+            "telegram_id": str(telegram_id),
+            "username": username,
+        }
+
     agent_code = uuid.uuid4().hex[:8].upper()
     ref_link = build_ref_link(agent_code)
+
     append_row_safe(ws_special_agents, [
         agent_code,
         full_name,
@@ -273,9 +440,9 @@ def save_special_agent(full_name: str, phone: str, telegram_id: int, username: s
         "username": username,
     }
 
-# =========================
+# =========================================================
 # CLIENTS
-# =========================
+# =========================================================
 def get_client_by_telegram_id(telegram_id: int):
     records = get_all_records(ws_clients)
     for r in records:
@@ -285,8 +452,8 @@ def get_client_by_telegram_id(telegram_id: int):
 
 def create_or_update_client(full_name: str, phone: str, telegram_id: int, username: str, ref_agent=None):
     existing_row = find_row_by_value(ws_clients, "telegram_id", str(telegram_id))
-
     existing = get_client_by_telegram_id(telegram_id)
+
     if existing:
         client_id = safe_str(existing.get("client_id"))
         fields = {
@@ -315,9 +482,9 @@ def create_or_update_client(full_name: str, phone: str, telegram_id: int, userna
     ])
     return client_id
 
-# =========================
+# =========================================================
 # LEADS
-# =========================
+# =========================================================
 def create_lead(
     client_id: str,
     client_name: str,
@@ -354,15 +521,18 @@ def get_lead(lead_id: str):
 def update_lead(lead_id: str, fields: dict):
     return update_by_id(ws_leads, "lead_id", lead_id, fields)
 
-# =========================
+# =========================================================
 # NOTIFY AGENTS
-# =========================
+# =========================================================
 async def notify_agents_about_lead(lead_id: str):
     lead = get_lead(lead_id)
     if not lead:
+        logger.error(f"Lead topilmadi: {lead_id}")
         return
 
     agents = get_active_agents()
+    logger.info(f"Topilgan agentlar soni: {len(agents)}")
+
     if not agents:
         logger.warning("Faol agentlar topilmadi")
         return
@@ -386,28 +556,36 @@ async def notify_agents_about_lead(lead_id: str):
     refs = []
     for agent in agents:
         try:
+            logger.info(f"Agentga yuborilyapti: {agent}")
             sent = await bot.send_message(
-                chat_id=agent["telegram_id"],
+                chat_id=int(agent["telegram_id"]),
                 text=text,
                 reply_markup=lead_kb(lead_id)
             )
             refs.append({
-                "chat_id": agent["telegram_id"],
+                "chat_id": int(agent["telegram_id"]),
                 "message_id": sent.message_id
             })
+            logger.info(f"Yuborildi: chat_id={agent['telegram_id']} message_id={sent.message_id}")
         except Exception as e:
-            logger.exception(f"Agentga yuborishda xato: {e}")
+            logger.exception(f"Agentga yuborishda xato: {agent} | error={e}")
 
     update_lead(lead_id, {
         "agent_message_refs": json.dumps(refs, ensure_ascii=False)
     })
+    logger.info(f"Saqlangan refs: {refs}")
 
-# =========================
+# =========================================================
 # COMMANDS
-# =========================
+# =========================================================
 @dp.message(CommandStart())
 async def start_cmd(message: Message, state: FSMContext):
     await state.clear()
+
+    # Agar oldindan agent bo'lsa, ma'lumoti /start da sync bo'ladi
+    was_agent = upsert_existing_agent_profile(message.from_user)
+    if was_agent:
+        logger.info(f"Agent profile synced: {message.from_user.id}")
 
     ref_code = parse_start_ref(message.text or "")
     if ref_code:
@@ -421,16 +599,74 @@ async def start_cmd(message: Message, state: FSMContext):
                 f"Энди маълумотларингизни киритинг.",
                 reply_markup=ReplyKeyboardRemove()
             )
-        else:
-            await message.answer(
-                "👋 Хуш келибсиз.\nРеферал код топилмади, оддий тартибда давом этамиз.",
-                reply_markup=ReplyKeyboardRemove()
-            )
+            return
+
+    await message.answer(
+        "👋 Хуш келибсиз.\nКеракли бўлимни танланг.",
+        reply_markup=main_menu()
+    )
+
+@dp.message(Command("myid"))
+async def myid_cmd(message: Message):
+    await message.answer(
+        f"🆔 Сизнинг Telegram ID: <code>{message.from_user.id}</code>"
+    )
+
+@dp.message(Command("register_agent"))
+async def register_agent_cmd(message: Message):
+    parts = safe_str(message.text).split()
+
+    if len(parts) < 2:
+        await message.answer("Формат:\n<code>/register_agent MAXFIY_KOD</code>")
+        return
+
+    secret = parts[1].strip()
+
+    if secret != AGENT_SECRET_CODE:
+        await message.answer("❌ Нотўғри код")
+        return
+
+    result = register_agent_by_secret(message.from_user)
+
+    if result == "exists":
+        await message.answer("✅ Сиз аллақачон агентсиз. Маълумотларингиз янгиланди.")
     else:
-        await message.answer(
-            "👋 Хуш келибсиз.\nКеракли бўлимни танланг.",
-            reply_markup=main_menu()
-        )
+        await message.answer("✅ Сиз агент сифатида рўйхатдан ўтдингиз.")
+
+@dp.message(Command("approve_agent"))
+async def approve_agent_cmd(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Сизда рухсат йўқ.")
+        return
+
+    parts = safe_str(message.text).split()
+    if len(parts) < 2:
+        await message.answer("Формат:\n<code>/approve_agent TELEGRAM_ID</code>")
+        return
+
+    target_telegram_id = parts[1].strip()
+    result = approve_agent_by_admin(target_telegram_id)
+
+    if result == "bad_id":
+        await message.answer("❌ TELEGRAM_ID нотўғри.")
+    elif result == "updated":
+        await message.answer(f"✅ Агент актив қилинди: <code>{target_telegram_id}</code>")
+        try:
+            await bot.send_message(
+                int(target_telegram_id),
+                "✅ Сиз админ томонидан агент сифатида тасдиқландингиз."
+            )
+        except Exception:
+            pass
+    else:
+        await message.answer(f"✅ Янги агент қўшилди: <code>{target_telegram_id}</code>")
+        try:
+            await bot.send_message(
+                int(target_telegram_id),
+                "✅ Сиз админ томонидан агент сифатида қўшилдингиз."
+            )
+        except Exception:
+            pass
 
 @dp.message(Command("admin"))
 async def admin_cmd(message: Message):
@@ -454,16 +690,19 @@ async def admin_cmd(message: Message):
         f"✅ Якунланган: {done_count}"
     )
 
-# =========================
-# MAIN MENU
-# =========================
+# =========================================================
+# MENU
+# =========================================================
 @dp.message(F.text == "☎️ Алоқа")
 async def contact_cmd(message: Message):
     await message.answer(
-        "☎️ Алоқа учун:\n+998 99 999 79 73",
+        f"☎️ Алоқа учун:\n{CONTACT_PHONE}",
         reply_markup=main_menu()
     )
 
+# =========================================================
+# SPECIAL AGENT FLOW
+# =========================================================
 @dp.message(F.text == "🤝 Махсус агент бўлиш")
 async def special_agent_start(message: Message, state: FSMContext):
     await state.set_state(SpecialAgentFlow.waiting_name)
@@ -474,7 +713,7 @@ async def special_agent_start(message: Message, state: FSMContext):
 
 @dp.message(SpecialAgentFlow.waiting_name)
 async def special_agent_name(message: Message, state: FSMContext):
-    full_name = message.text.strip()
+    full_name = safe_str(message.text).strip()
     await state.update_data(full_name=full_name)
     await state.set_state(SpecialAgentFlow.waiting_phone)
     await message.answer("Телефон рақамингизни киритинг ёки юборинг:", reply_markup=phone_kb())
@@ -527,6 +766,9 @@ async def special_agent_phone_text(message: Message, state: FSMContext):
         reply_markup=main_menu()
     )
 
+# =========================================================
+# CLIENT FLOW
+# =========================================================
 @dp.message(F.text == "📝 Заявка қолдириш")
 async def client_start(message: Message, state: FSMContext):
     await state.set_state(ClientFlow.waiting_name)
@@ -537,7 +779,7 @@ async def client_start(message: Message, state: FSMContext):
 
 @dp.message(ClientFlow.waiting_name)
 async def client_name(message: Message, state: FSMContext):
-    await state.update_data(full_name=message.text.strip())
+    await state.update_data(full_name=safe_str(message.text).strip())
     await state.set_state(ClientFlow.waiting_phone)
     await message.answer(
         "Телефон рақамингизни юборинг:",
@@ -569,7 +811,7 @@ async def client_cancel(message: Message, state: FSMContext):
 
 @dp.message(ClientFlow.waiting_service)
 async def client_service(message: Message, state: FSMContext):
-    await state.update_data(service_type=message.text.strip())
+    await state.update_data(service_type=safe_str(message.text).strip())
     await state.set_state(ClientFlow.waiting_note)
     await message.answer(
         "Қўшимча изоҳ ёзинг. Агар изоҳ бўлмаса '-' юборинг:",
@@ -629,13 +871,13 @@ async def client_note(message: Message, state: FSMContext):
 
     await message.answer(text, reply_markup=main_menu())
 
-# =========================
+# =========================================================
 # CALLBACKS
-# =========================
+# =========================================================
 @dp.callback_query(F.data.startswith("lead:take:"))
 async def lead_take(callback: CallbackQuery):
     try:
-        _, action, lead_id = callback.data.split(":")
+        _, _, lead_id = callback.data.split(":")
         lead = get_lead(lead_id)
 
         if not lead:
@@ -709,7 +951,7 @@ async def lead_take(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("lead:reject:"))
 async def lead_reject(callback: CallbackQuery):
     try:
-        _, action, lead_id = callback.data.split(":")
+        _, _, lead_id = callback.data.split(":")
         lead = get_lead(lead_id)
 
         if not lead:
@@ -749,7 +991,7 @@ async def lead_reject(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("lead:done:"))
 async def lead_done(callback: CallbackQuery):
     try:
-        _, action, lead_id = callback.data.split(":")
+        _, _, lead_id = callback.data.split(":")
         lead = get_lead(lead_id)
 
         if not lead:
@@ -814,19 +1056,37 @@ async def lead_done(callback: CallbackQuery):
         logger.exception(e)
         await callback.answer("Хатолик юз берди", show_alert=True)
 
-# =========================
+# =========================================================
 # FALLBACK
-# =========================
-@dp.message()
+# =========================================================
+@dp.message(F.text)
 async def fallback_handler(message: Message):
+    # Keraksiz takror javob bermasligi uchun faqat noma'lum textlarda ishlaydi
+    known = {
+        "📝 Заявка қолдириш",
+        "🤝 Махсус агент бўлиш",
+        "☎️ Алоқа",
+        "🔙 Бекор қилиш",
+        "🏠 Уй сотиб олиш",
+        "🏠 Уй сотиш",
+        "🔑 Ижарага олиш",
+        "🔑 Ижарага бериш",
+        "💳 Ипотека",
+        "📄 Кадастр",
+    }
+    if safe_str(message.text) in known:
+        return
+
+    # FSM holatida bo'lsa, handlerlar o'zi ishlaydi
+    # Bu yerga kelgan noma'lum text uchun menyu qaytadi
     await message.answer(
         "Керакли бўлимни менюдан танланг.",
         reply_markup=main_menu()
     )
 
-# =========================
+# =========================================================
 # RUN
-# =========================
+# =========================================================
 async def main():
     logger.info("Bot ishga tushdi")
     await dp.start_polling(bot)
