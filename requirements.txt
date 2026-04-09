@@ -1,0 +1,5 @@
+aiogram==3.27.0
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
+gspread==6.2.1
+google-auth==2.40.3
