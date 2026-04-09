@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import uuid
 import logging
 import threading
 from datetime import datetime
@@ -12,23 +13,22 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # =========================================================
-# LOGGING
+# CONFIG
 # =========================================================
+APP_VERSION = "GK_CRM_FINAL_v3.0.0"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# =========================================================
-# ENV
-# =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 SPREADSHEET_URL = os.getenv("SPREADSHEET_URL", "").strip()
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON", "").strip()
-ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "").strip()  # example: 12345,67890
+ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "").strip()
 CONTACT_PHONE = os.getenv("CONTACT_PHONE", "+998 99 999 79 73").strip()
-BOT_NAME = os.getenv("BOT_NAME", "Golden Key Bot").strip()
+BOT_NAME = os.getenv("BOT_NAME", "Golden Key Smart Bot").strip()
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN topilmadi")
@@ -45,19 +45,20 @@ if ADMIN_IDS_RAW:
             ADMIN_IDS.add(int(x))
 
 # =========================================================
-# FLASK HEALTHCHECK
+# FLASK / HEALTHCHECK
 # =========================================================
 web_app = Flask(__name__)
 
 @web_app.route("/")
 def home():
-    return f"{BOT_NAME} is running", 200
+    return f"{BOT_NAME} {APP_VERSION} running", 200
 
 @web_app.route("/health")
 def health():
     return jsonify({
         "status": "ok",
         "service": BOT_NAME,
+        "version": APP_VERSION,
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }), 200
 
@@ -92,32 +93,19 @@ def get_or_create_sheet(title, headers):
     try:
         ws = sh.worksheet(title)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=title, rows=1000, cols=max(20, len(headers) + 5))
+        ws = sh.add_worksheet(title=title, rows=3000, cols=max(30, len(headers) + 5))
+
     first_row = ws.row_values(1)
     if not first_row:
         ws.append_row(headers)
     return ws
 
-def init_sheets():
-    leads_headers = [
-        "lead_id", "created_at", "client_chat_id", "telegram_id", "username",
-        "full_name", "phone", "direction", "comment", "status",
-        "agent_id", "agent_name", "agent_username", "taken_at",
-        "completed_at", "rejected_by", "source"
-    ]
-    agents_headers = [
-        "agent_id", "full_name", "username", "phone", "is_active", "role"
-    ]
-    get_or_create_sheet("Leads", leads_headers)
-    get_or_create_sheet("Agents", agents_headers)
-    logger.info("Sheets initialized")
-
 def leads_ws():
     return get_or_create_sheet("Leads", [
         "lead_id", "created_at", "client_chat_id", "telegram_id", "username",
         "full_name", "phone", "direction", "comment", "status",
-        "agent_id", "agent_name", "agent_username", "taken_at",
-        "completed_at", "rejected_by", "source"
+        "agent_id", "agent_name", "agent_username", "agent_phone",
+        "taken_at", "completed_at", "rejected_by", "source", "last_notified_at"
     ])
 
 def agents_ws():
@@ -125,82 +113,18 @@ def agents_ws():
         "agent_id", "full_name", "username", "phone", "is_active", "role"
     ])
 
-# =========================================================
-# MEMORY STATE
-# =========================================================
-user_state = {}
+def special_leads_ws():
+    return get_or_create_sheet("SpecialLeads", [
+        "special_id", "created_at", "special_agent_name", "special_agent_phone",
+        "special_agent_telegram_id", "special_agent_username",
+        "client_name", "client_phone", "comment", "status"
+    ])
 
-def ensure_user(uid):
-    if uid not in user_state:
-        user_state[uid] = {
-            "step": None,
-            "direction": "",
-            "full_name": "",
-            "phone": "",
-            "comment": ""
-        }
-
-def reset_user(uid):
-    user_state[uid] = {
-        "step": None,
-        "direction": "",
-        "full_name": "",
-        "phone": "",
-        "comment": ""
-    }
-
-# =========================================================
-# KEYBOARDS
-# =========================================================
-def main_menu():
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("🏠 Уй сотиш", "🏡 Уй олиш")
-    kb.row("🔑 Ижарага бериш", "📄 Ижарага олиш")
-    kb.row("💳 Ипотека", "☎️ Алоқа")
-    return kb
-
-def phone_keyboard():
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    kb.add(types.KeyboardButton("📱 Телефон юбориш", request_contact=True))
-    kb.row("⬅️ Орқага")
-    return kb
-
-def back_keyboard():
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row("⬅️ Орқага")
-    return kb
-
-def agent_inline_kb(lead_id):
-    kb = types.InlineKeyboardMarkup()
-    kb.row(
-        types.InlineKeyboardButton("✅ Олдим", callback_data=f"take|{lead_id}"),
-        types.InlineKeyboardButton("❌ Рад этилди", callback_data=f"reject|{lead_id}")
-    )
-    kb.row(
-        types.InlineKeyboardButton("🏁 Бажарилди", callback_data=f"done|{lead_id}")
-    )
-    return kb
-
-# =========================================================
-# HELPERS
-# =========================================================
-def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
-
-def safe_username(user):
-    return user.username if user and user.username else ""
-
-def now_str():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-def new_lead_id():
-    return f"LID-{int(time.time())}"
-
-def find_col_index(headers, col_name):
-    try:
-        return headers.index(col_name) + 1
-    except ValueError:
-        return None
+def init_sheets():
+    leads_ws()
+    agents_ws()
+    special_leads_ws()
+    logger.info("Sheets initialized")
 
 def get_all_records_safe(ws):
     try:
@@ -209,21 +133,30 @@ def get_all_records_safe(ws):
         logger.exception(f"get_all_records error: {e}")
         return []
 
-def find_lead_row_by_id(lead_id):
-    ws = leads_ws()
+def find_row_by_value(ws, id_col_name, id_value):
     values = ws.get_all_values()
     if not values:
         return None, None
+
     headers = values[0]
-    lead_col = headers.index("lead_id")
-    for idx, row in enumerate(values[1:], start=2):
-        if len(row) > lead_col and str(row[lead_col]).strip() == str(lead_id).strip():
-            return idx, headers
+    if id_col_name not in headers:
+        return None, headers
+
+    idx_col = headers.index(id_col_name)
+    for row_num, row in enumerate(values[1:], start=2):
+        val = row[idx_col].strip() if len(row) > idx_col else ""
+        if str(val) == str(id_value):
+            return row_num, headers
     return None, headers
 
-def update_lead_fields(lead_id, updates: dict):
-    ws = leads_ws()
-    row_num, headers = find_lead_row_by_id(lead_id)
+def find_col_index(headers, col_name):
+    try:
+        return headers.index(col_name) + 1
+    except ValueError:
+        return None
+
+def update_row_fields(ws, id_col_name, id_value, updates: dict):
+    row_num, headers = find_row_by_value(ws, id_col_name, id_value)
     if not row_num:
         return False
 
@@ -234,15 +167,102 @@ def update_lead_fields(lead_id, updates: dict):
     return True
 
 def get_lead_by_id(lead_id):
-    ws = leads_ws()
-    records = get_all_records_safe(ws)
-    for rec in records:
-        if str(rec.get("lead_id", "")).strip() == str(lead_id).strip():
-            return rec
+    for r in get_all_records_safe(leads_ws()):
+        if str(r.get("lead_id", "")).strip() == str(lead_id).strip():
+            return r
     return None
 
-def save_lead(data: dict):
-    ws = leads_ws()
+# =========================================================
+# HELPERS
+# =========================================================
+def now_str():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def new_lead_id():
+    return f"LID-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
+
+def new_special_id():
+    return f"SP-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
+
+def safe_username(user):
+    return user.username if user and user.username else ""
+
+def parse_bool_text(v):
+    return str(v).strip().lower() in ("1", "true", "yes", "ha", "active")
+
+def parse_rejected_by(text):
+    raw = str(text or "").strip()
+    if not raw:
+        return set()
+    return set(x.strip() for x in raw.split(",") if x.strip())
+
+def rejected_by_to_text(values_set):
+    return ",".join(sorted(values_set)) if values_set else ""
+
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
+
+def get_active_agents():
+    rows = get_all_records_safe(agents_ws())
+    result = []
+    for r in rows:
+        agent_id = str(r.get("agent_id", "")).strip()
+        if not agent_id.isdigit():
+            continue
+
+        role = str(r.get("role", "")).strip().lower()
+        if role not in ("agent", "admin"):
+            continue
+
+        if not parse_bool_text(r.get("is_active", "")):
+            continue
+
+        result.append({
+            "agent_id": int(agent_id),
+            "full_name": str(r.get("full_name", "")).strip(),
+            "username": str(r.get("username", "")).strip(),
+            "phone": str(r.get("phone", "")).strip(),
+            "role": role
+        })
+    return result
+
+def get_agent_info_by_id(agent_id):
+    for a in get_active_agents():
+        if int(a["agent_id"]) == int(agent_id):
+            return a
+    return None
+
+def notify_admins(text):
+    for admin_id in ADMIN_IDS:
+        try:
+            bot.send_message(admin_id, text)
+        except Exception as e:
+            logger.exception(f"Admin notify error {admin_id}: {e}")
+
+def register_admin_in_agents(user):
+    if not is_admin(user.id):
+        return
+
+    ws = agents_ws()
+    row_num, _ = find_row_by_value(ws, "agent_id", str(user.id))
+    row = [
+        str(user.id),
+        f"{user.first_name or ''} {user.last_name or ''}".strip(),
+        safe_username(user),
+        "",
+        "true",
+        "admin"
+    ]
+
+    if row_num:
+        ws.update(f"A{row_num}:F{row_num}", [row])
+    else:
+        ws.append_row(row)
+
+# =========================================================
+# STORAGE
+# =========================================================
+def save_regular_lead(data: dict):
     lead_id = new_lead_id()
     row = [
         lead_id,
@@ -261,92 +281,122 @@ def save_lead(data: dict):
         "",
         "",
         "",
-        "telegram_bot"
+        "",
+        "telegram_bot",
+        now_str()
     ]
-    ws.append_row(row)
+    leads_ws().append_row(row)
     return lead_id
 
-def get_active_agents():
-    ws = agents_ws()
-    records = get_all_records_safe(ws)
-    result = []
-    for r in records:
-        agent_id = str(r.get("agent_id", "")).strip()
-        is_active = str(r.get("is_active", "")).strip().lower()
-        if agent_id.isdigit() and is_active in ("1", "true", "yes", "ha", "active"):
-            result.append({
-                "agent_id": int(agent_id),
-                "full_name": str(r.get("full_name", "")).strip(),
-                "username": str(r.get("username", "")).strip(),
-                "phone": str(r.get("phone", "")).strip(),
-                "role": str(r.get("role", "")).strip(),
-            })
-    return result
+def save_special_lead(data: dict):
+    special_id = new_special_id()
+    row = [
+        special_id,
+        now_str(),
+        str(data.get("special_agent_name", "")),
+        str(data.get("special_agent_phone", "")),
+        str(data.get("special_agent_telegram_id", "")),
+        str(data.get("special_agent_username", "")),
+        str(data.get("client_name", "")),
+        str(data.get("client_phone", "")),
+        str(data.get("comment", "")),
+        "NEW"
+    ]
+    special_leads_ws().append_row(row)
+    return special_id
 
-def notify_agents_about_lead(lead_id, payload):
-    agents = get_active_agents()
-    if not agents:
-        logger.warning("Active agents topilmadi")
-        return 0
+# =========================================================
+# STATE
+# =========================================================
+user_state = {}
 
-    text = (
-        "📥 <b>Янги лид</b>\n\n"
+def default_user_state():
+    return {
+        "flow": None,
+
+        "step": None,
+        "direction": "",
+        "full_name": "",
+        "phone": "",
+        "comment": "",
+
+        "sa_step": None,
+        "sa_name": "",
+        "sa_phone": "",
+        "sa_client_name": "",
+        "sa_client_phone": "",
+        "sa_comment": ""
+    }
+
+def ensure_user(uid):
+    if uid not in user_state:
+        user_state[uid] = default_user_state()
+
+def reset_all(uid):
+    user_state[uid] = default_user_state()
+
+# =========================================================
+# UI
+# =========================================================
+def main_menu():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("🏠 Уй сотиш", "🏡 Уй олиш")
+    kb.row("🔑 Ижарага бериш", "📄 Ижарага олиш")
+    kb.row("💳 Ипотека", "🌟 Махсус агент")
+    kb.row("☎️ Алоқа")
+    return kb
+
+def phone_keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add(types.KeyboardButton("📱 Телефон юбориш", request_contact=True))
+    kb.row("⬅️ Орқага")
+    return kb
+
+def back_keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row("⬅️ Орқага")
+    return kb
+
+def agent_inline_kb(lead_id):
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("✅ Олдим", callback_data=f"take|{lead_id}"),
+        types.InlineKeyboardButton("❌ Рад этилди", callback_data=f"reject|{lead_id}")
+    )
+    kb.add(types.InlineKeyboardButton("🏁 Бажарилди", callback_data=f"done|{lead_id}"))
+    return kb
+
+def lead_text(lead_id, payload, reassigned=False):
+    title = "🔁 <b>Қайта юборилган лид</b>" if reassigned else "📥 <b>Янги лид</b>"
+    return (
+        f"{title}\n\n"
         f"🆔 <b>{lead_id}</b>\n"
         f"👤 Исм: {payload.get('full_name', '-')}\n"
         f"📞 Телефон: {payload.get('phone', '-')}\n"
         f"📌 Йўналиш: {payload.get('direction', '-')}\n"
         f"💬 Изоҳ: {payload.get('comment', '-')}\n"
         f"🆔 Telegram ID: {payload.get('telegram_id', '-')}\n"
-        f"🔗 Username: @{payload.get('username', '-') if payload.get('username') else '-'}"
+        f"🔗 Username: @{payload.get('username') or '-'}"
     )
 
+def notify_agents_about_lead(lead_id, payload, exclude_ids=None, reassigned=False):
+    exclude_ids = set(str(x) for x in (exclude_ids or set()))
     sent = 0
-    for agent in agents:
+
+    for agent in get_active_agents():
+        if str(agent["agent_id"]) in exclude_ids:
+            continue
         try:
             bot.send_message(
                 agent["agent_id"],
-                text,
+                lead_text(lead_id, payload, reassigned=reassigned),
                 reply_markup=agent_inline_kb(lead_id)
             )
             sent += 1
         except Exception as e:
-            logger.exception(f"Agentga yuborishda xatolik {agent['agent_id']}: {e}")
+            logger.exception(f"Agent notify error {agent['agent_id']}: {e}")
+
     return sent
-
-def notify_admins(text):
-    for admin_id in ADMIN_IDS:
-        try:
-            bot.send_message(admin_id, text)
-        except Exception as e:
-            logger.exception(f"Admin notify error {admin_id}: {e}")
-
-def register_agent_if_admin(user):
-    if not is_admin(user.id):
-        return
-    ws = agents_ws()
-    records = get_all_records_safe(ws)
-
-    for i, rec in enumerate(records, start=2):
-        if str(rec.get("agent_id", "")).strip() == str(user.id):
-            # update existing
-            ws.update(f"A{i}:F{i}", [[
-                str(user.id),
-                f"{user.first_name or ''} {user.last_name or ''}".strip(),
-                safe_username(user),
-                "",
-                "true",
-                "admin"
-            ]])
-            return
-
-    ws.append_row([
-        str(user.id),
-        f"{user.first_name or ''} {user.last_name or ''}".strip(),
-        safe_username(user),
-        "",
-        "true",
-        "admin"
-    ])
 
 # =========================================================
 # STATS
@@ -356,44 +406,51 @@ def compute_stats():
     today = datetime.now().strftime("%Y-%m-%d")
     month = datetime.now().strftime("%Y-%m")
 
+    total = len(records)
+    new_count = 0
+    taken_count = 0
+    done_count = 0
+    redirected_count = 0
     daily_new = 0
     monthly_new = 0
-    completed_by_agent = {}
+    top_agents = {}
 
     for r in records:
         created_at = str(r.get("created_at", ""))
-        completed_at = str(r.get("completed_at", ""))
-        status = str(r.get("status", "")).upper()
+        status = str(r.get("status", "")).strip().upper()
         agent_name = str(r.get("agent_name", "")).strip() or "Номаълум"
 
         if created_at.startswith(today):
             daily_new += 1
         if created_at.startswith(month):
             monthly_new += 1
-        if status == "DONE":
-            completed_by_agent[agent_name] = completed_by_agent.get(agent_name, 0) + 1
+
+        if status == "NEW":
+            new_count += 1
+        elif status == "TAKEN":
+            taken_count += 1
+        elif status == "DONE":
+            done_count += 1
+            top_agents[agent_name] = top_agents.get(agent_name, 0) + 1
+
+        if str(r.get("rejected_by", "")).strip():
+            redirected_count += 1
 
     top_agent_name = "-"
     top_agent_count = 0
-    for k, v in completed_by_agent.items():
+    for k, v in top_agents.items():
         if v > top_agent_count:
             top_agent_name = k
             top_agent_count = v
 
-    total = len(records)
-    new_count = sum(1 for r in records if str(r.get("status", "")).upper() == "NEW")
-    taken_count = sum(1 for r in records if str(r.get("status", "")).upper() == "TAKEN")
-    done_count = sum(1 for r in records if str(r.get("status", "")).upper() == "DONE")
-    rejected_count = sum(1 for r in records if str(r.get("status", "")).upper() == "REJECTED")
-
     return {
         "total": total,
-        "daily_new": daily_new,
-        "monthly_new": monthly_new,
         "new_count": new_count,
         "taken_count": taken_count,
         "done_count": done_count,
-        "rejected_count": rejected_count,
+        "redirected_count": redirected_count,
+        "daily_new": daily_new,
+        "monthly_new": monthly_new,
         "top_agent_name": top_agent_name,
         "top_agent_count": top_agent_count
     }
@@ -403,15 +460,15 @@ def compute_stats():
 # =========================================================
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
-    ensure_user(message.from_user.id)
-    reset_user(message.from_user.id)
-    register_agent_if_admin(message.from_user)
-
-    text = (
+    reset_all(message.from_user.id)
+    register_admin_in_agents(message.from_user)
+    bot.send_message(
+        message.chat.id,
         f"Assalomu alaykum, <b>{message.from_user.first_name}</b>!\n\n"
-        "Kerakli xizmatni tanlang:"
+        f"Версия: <b>{APP_VERSION}</b>\n"
+        "Керакли хизматни танланг:",
+        reply_markup=main_menu()
     )
-    bot.send_message(message.chat.id, text, reply_markup=main_menu())
 
 @bot.message_handler(commands=["menu"])
 def cmd_menu(message):
@@ -421,9 +478,13 @@ def cmd_menu(message):
 def cmd_help(message):
     bot.send_message(
         message.chat.id,
-        "/start - бошлаш\n/menu - меню\n/admin - статистика",
+        "/start - бошлаш\n/menu - меню\n/version - версия\n/admin - статистика",
         reply_markup=main_menu()
     )
+
+@bot.message_handler(commands=["version"])
+def cmd_version(message):
+    bot.send_message(message.chat.id, f"Ишлаяптган версия: <b>{APP_VERSION}</b>")
 
 @bot.message_handler(commands=["admin"])
 def cmd_admin(message):
@@ -438,16 +499,17 @@ def cmd_admin(message):
         f"🆕 Янги: <b>{st['new_count']}</b>\n"
         f"✅ Олинган: <b>{st['taken_count']}</b>\n"
         f"🏁 Якунланган: <b>{st['done_count']}</b>\n"
-        f"❌ Рад этилган: <b>{st['rejected_count']}</b>\n\n"
+        f"🔁 Қайта йўналтирилган: <b>{st['redirected_count']}</b>\n\n"
         f"📅 Бугунги лидлар: <b>{st['daily_new']}</b>\n"
         f"🗓 Шу ой лидлари: <b>{st['monthly_new']}</b>\n\n"
         f"🥇 Энг яхши агент: <b>{st['top_agent_name']}</b>\n"
-        f"🏆 Якунлаган лидлар: <b>{st['top_agent_count']}</b>"
+        f"🏆 Якунлаган лидлар: <b>{st['top_agent_count']}</b>\n\n"
+        f"🧩 Версия: <b>{APP_VERSION}</b>"
     )
     bot.send_message(message.chat.id, text)
 
 # =========================================================
-# MENU FLOW
+# MENU
 # =========================================================
 SERVICE_BUTTONS = [
     "🏠 Уй сотиш",
@@ -461,9 +523,28 @@ SERVICE_BUTTONS = [
 def choose_direction(message):
     uid = message.from_user.id
     ensure_user(uid)
+    reset_all(uid)
+
+    user_state[uid]["flow"] = "regular"
     user_state[uid]["direction"] = message.text
     user_state[uid]["step"] = "full_name"
+
     bot.send_message(message.chat.id, "Исмингизни киритинг:", reply_markup=back_keyboard())
+
+@bot.message_handler(func=lambda m: m.text == "🌟 Махсус агент")
+def choose_special_agent(message):
+    uid = message.from_user.id
+    ensure_user(uid)
+    reset_all(uid)
+
+    user_state[uid]["flow"] = "special"
+    user_state[uid]["sa_step"] = "sa_name"
+
+    bot.send_message(
+        message.chat.id,
+        "🌟 <b>Махсус агент</b>\n\nАввал исмингизни киритинг:",
+        reply_markup=back_keyboard()
+    )
 
 @bot.message_handler(func=lambda m: m.text == "☎️ Алоқа")
 def show_contact(message):
@@ -475,245 +556,206 @@ def show_contact(message):
 
 @bot.message_handler(func=lambda m: m.text == "⬅️ Орқага")
 def go_back(message):
-    reset_user(message.from_user.id)
+    reset_all(message.from_user.id)
     bot.send_message(message.chat.id, "Асосий менюга қайтдингиз.", reply_markup=main_menu())
 
 # =========================================================
-# CONTACT HANDLER
+# CONTACTS
 # =========================================================
 @bot.message_handler(content_types=["contact"])
 def handle_contact(message):
     uid = message.from_user.id
     ensure_user(uid)
-
-    if user_state[uid]["step"] != "phone":
-        return
-
     phone = message.contact.phone_number or ""
-    user_state[uid]["phone"] = phone
-    user_state[uid]["step"] = "comment"
 
-    bot.send_message(
-        message.chat.id,
-        "Қисқача изоҳ ёзинг.\nМасалан: туман, бюджет, хона сони ва ҳ.к.",
-        reply_markup=back_keyboard()
-    )
-
-# =========================================================
-# TEXT HANDLER
-# =========================================================
-@bot.message_handler(content_types=["text"])
-def handle_text(message):
-    uid = message.from_user.id
-    ensure_user(uid)
-
-    text = (message.text or "").strip()
-
-    if text in SERVICE_BUTTONS or text in ["☎️ Алоқа", "⬅️ Орқага"]:
-        return
-
-    step = user_state[uid]["step"]
-
-    if step == "full_name":
-        user_state[uid]["full_name"] = text
-        user_state[uid]["step"] = "phone"
-        bot.send_message(
-            message.chat.id,
-            "Телефон рақамингизни юборинг:",
-            reply_markup=phone_keyboard()
-        )
-        return
-
-    if step == "phone":
-        user_state[uid]["phone"] = text
+    if user_state[uid]["flow"] == "regular" and user_state[uid]["step"] == "phone":
+        user_state[uid]["phone"] = phone
         user_state[uid]["step"] = "comment"
         bot.send_message(
             message.chat.id,
-            "Қисқача изоҳ ёзинг.\nМасалан: туман, бюджет, хона сони ва ҳ.к.",
+            "Қисқача изоҳ ёзинг:",
             reply_markup=back_keyboard()
         )
         return
 
-    if step == "comment":
-        user_state[uid]["comment"] = text
+    if user_state[uid]["flow"] == "special":
+        if user_state[uid]["sa_step"] == "sa_phone":
+            user_state[uid]["sa_phone"] = phone
+            user_state[uid]["sa_step"] = "sa_client_name"
+            bot.send_message(message.chat.id, "Мижоз исмини киритинг:", reply_markup=back_keyboard())
+            return
 
-        payload = {
-            "client_chat_id": message.chat.id,
-            "telegram_id": uid,
-            "username": safe_username(message.from_user),
-            "full_name": user_state[uid]["full_name"],
-            "phone": user_state[uid]["phone"],
-            "direction": user_state[uid]["direction"],
-            "comment": user_state[uid]["comment"],
-        }
-
-        lead_id = save_lead(payload)
-        notify_count = notify_agents_about_lead(lead_id, payload)
-
-        bot.send_message(
-            message.chat.id,
-            (
-                "✅ Сўровингиз қабул қилинди!\n\n"
-                f"🆔 ID: <b>{lead_id}</b>\n"
-                f"👨‍💼 Хабар юборилган агентлар: <b>{notify_count}</b>\n"
-                "Тез орада сиз билан боғланишади."
-            ),
-            reply_markup=main_menu()
-        )
-
-        notify_admins(
-            f"📢 Янги лид тушди\n"
-            f"🆔 {lead_id}\n"
-            f"👤 {payload['full_name']}\n"
-            f"📞 {payload['phone']}\n"
-            f"📌 {payload['direction']}"
-        )
-
-        reset_user(uid)
-        return
-
-    bot.send_message(
-        message.chat.id,
-        "Керакли бўлимни менюдан танланг:",
-        reply_markup=main_menu()
-    )
+        if user_state[uid]["sa_step"] == "sa_client_phone":
+            user_state[uid]["sa_client_phone"] = phone
+            user_state[uid]["sa_step"] = "sa_comment"
+            bot.send_message(message.chat.id, "Изоҳ ёзинг:", reply_markup=back_keyboard())
+            return
 
 # =========================================================
-# CALLBACKS FOR AGENTS
+# CALLBACKS
 # =========================================================
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     try:
-        data = (call.data or "").split("|")
-        action = data[0]
-        lead_id = data[1] if len(data) > 1 else ""
+        parts = (call.data or "").split("|")
+        if len(parts) != 2:
+            bot.answer_callback_query(call.id, "Хато callback")
+            return
 
+        action, lead_id = parts[0], parts[1].strip()
         user = call.from_user
-        user_id = user.id
+        agent_id = str(user.id)
         agent_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
         agent_username = safe_username(user)
 
         lead = get_lead_by_id(lead_id)
         if not lead:
-            bot.answer_callback_query(call.id, "Lead topilmadi")
+            bot.answer_callback_query(call.id, "Лид топилмади", show_alert=True)
             return
 
-        current_status = str(lead.get("status", "")).upper()
+        status = str(lead.get("status", "")).strip().upper()
+        current_agent_id = str(lead.get("agent_id", "")).strip()
+        client_chat_id = str(lead.get("client_chat_id", "")).strip()
+        rejected_by = parse_rejected_by(lead.get("rejected_by", ""))
+
+        payload = {
+            "client_chat_id": lead.get("client_chat_id", ""),
+            "telegram_id": lead.get("telegram_id", ""),
+            "username": lead.get("username", ""),
+            "full_name": lead.get("full_name", ""),
+            "phone": lead.get("phone", ""),
+            "direction": lead.get("direction", ""),
+            "comment": lead.get("comment", ""),
+        }
 
         if action == "take":
-            if current_status == "DONE":
-                bot.answer_callback_query(call.id, "Бу лид аллақачон якунланган")
+            if status == "DONE":
+                bot.answer_callback_query(call.id, "Бу лид якунланган")
                 return
 
-            if current_status == "TAKEN":
-                current_agent_id = str(lead.get("agent_id", "")).strip()
-                if current_agent_id == str(user_id):
+            if status == "TAKEN":
+                if current_agent_id == agent_id:
                     bot.answer_callback_query(call.id, "Сиз аллақачон олгансиз")
                 else:
                     bot.answer_callback_query(call.id, "Бу лидни бошқа агент олган")
                 return
 
-            update_lead_fields(lead_id, {
+            agent_info = get_agent_info_by_id(agent_id)
+            agent_phone = agent_info["phone"] if agent_info else ""
+
+            ok = update_row_fields(leads_ws(), "lead_id", lead_id, {
                 "status": "TAKEN",
-                "agent_id": str(user_id),
+                "agent_id": agent_id,
                 "agent_name": agent_name,
                 "agent_username": agent_username,
-                "taken_at": now_str(),
-                "rejected_by": ""
+                "agent_phone": agent_phone,
+                "taken_at": now_str()
             })
 
-            try:
-                bot.edit_message_reply_markup(
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id,
-                    reply_markup=agent_inline_kb(lead_id)
+            if not ok:
+                bot.answer_callback_query(call.id, "Лидни янгилашда хато")
+                return
+
+            if client_chat_id.isdigit():
+                text = (
+                    "👨‍💼 Сизнинг мурожаатингизни агент қабул қилди.\n\n"
+                    f"👤 Агент: <b>{agent_name}</b>\n"
                 )
-            except Exception:
-                pass
+                if agent_phone:
+                    text += f"📞 Телефон: <b>{agent_phone}</b>\n"
+                if agent_username:
+                    text += f"🔗 Username: @{agent_username}\n"
+                text += "\nТез орада сиз билан боғланади."
+
+                try:
+                    bot.send_message(int(client_chat_id), text)
+                except Exception as e:
+                    logger.exception(f"client take notify error: {e}")
 
             bot.answer_callback_query(call.id, "Лид сизга бириктирилди ✅")
-
-            try:
-                client_chat_id = str(lead.get("client_chat_id", "")).strip()
-                if client_chat_id.isdigit():
-                    bot.send_message(
-                        int(client_chat_id),
-                        "👨‍💼 Менежер сизнинг сўровингизни олди. Тез орада боғланади."
-                    )
-            except Exception as e:
-                logger.exception(f"Client notify on take error: {e}")
-
             return
 
         if action == "reject":
-            rejected_by_old = str(lead.get("rejected_by", "")).strip()
-            new_rejected_by = rejected_by_old + ("," if rejected_by_old else "") + str(user_id)
-
-            if current_status == "DONE":
+            if status == "DONE":
                 bot.answer_callback_query(call.id, "Бу лид якунланган")
                 return
 
-            if current_status == "TAKEN":
-                current_agent_id = str(lead.get("agent_id", "")).strip()
-                if current_agent_id == str(user_id):
-                    update_lead_fields(lead_id, {
-                        "status": "NEW",
-                        "agent_id": "",
-                        "agent_name": "",
-                        "agent_username": "",
-                        "taken_at": "",
-                        "rejected_by": new_rejected_by
-                    })
-                    bot.answer_callback_query(call.id, "Лиддан воз кечдингиз")
-                else:
-                    bot.answer_callback_query(call.id, "Бу лид бошқа агентда")
-                return
-
-            update_lead_fields(lead_id, {
-                "rejected_by": new_rejected_by
-            })
-            bot.answer_callback_query(call.id, "Рад этилди")
-            return
-
-        if action == "done":
-            if current_status != "TAKEN":
-                bot.answer_callback_query(call.id, "Аввал лидни олиш керак")
-                return
-
-            current_agent_id = str(lead.get("agent_id", "")).strip()
-            if current_agent_id != str(user_id):
+            if status == "TAKEN" and current_agent_id != agent_id:
                 bot.answer_callback_query(call.id, "Бу лид сизга тегишли эмас")
                 return
 
-            update_lead_fields(lead_id, {
+            rejected_by.add(agent_id)
+
+            ok = update_row_fields(leads_ws(), "lead_id", lead_id, {
+                "status": "NEW",
+                "agent_id": "",
+                "agent_name": "",
+                "agent_username": "",
+                "agent_phone": "",
+                "taken_at": "",
+                "rejected_by": rejected_by_to_text(rejected_by),
+                "last_notified_at": now_str()
+            })
+
+            if not ok:
+                bot.answer_callback_query(call.id, "Лидни янгилашда хато")
+                return
+
+            sent = notify_agents_about_lead(
+                lead_id,
+                payload,
+                exclude_ids=rejected_by,
+                reassigned=True
+            )
+
+            if client_chat_id.isdigit():
+                try:
+                    bot.send_message(
+                        int(client_chat_id),
+                        "ℹ️ Сизнинг мурожаатингиз бошқа агентга ўтказилди. Янги агент сиз билан боғланади."
+                    )
+                except Exception as e:
+                    logger.exception(f"client reject notify error: {e}")
+
+            if sent > 0:
+                bot.answer_callback_query(call.id, "Лид бошқа агентларга юборилди")
+            else:
+                bot.answer_callback_query(call.id, "Бошқа актив агент топилмади")
+                notify_admins(f"⚠️ {lead_id} учун бошқа актив агент топилмади")
+            return
+
+        if action == "done":
+            if status != "TAKEN":
+                bot.answer_callback_query(call.id, "Аввал лидни олиш керак")
+                return
+
+            if current_agent_id != agent_id:
+                bot.answer_callback_query(call.id, "Бу лид сизга тегишли эмас")
+                return
+
+            ok = update_row_fields(leads_ws(), "lead_id", lead_id, {
                 "status": "DONE",
                 "completed_at": now_str()
             })
 
-            bot.answer_callback_query(call.id, "Лид якунланди 🏁")
+            if not ok:
+                bot.answer_callback_query(call.id, "Лидни янгилашда хато")
+                return
 
-            try:
-                client_chat_id = str(lead.get("client_chat_id", "")).strip()
-                if client_chat_id.isdigit():
+            if client_chat_id.isdigit():
+                try:
                     bot.send_message(
                         int(client_chat_id),
                         "✅ Сизнинг мурожаатингиз бўйича иш якунланди. Рахмат!"
                     )
-            except Exception as e:
-                logger.exception(f"Client notify on done error: {e}")
+                except Exception as e:
+                    logger.exception(f"client done notify error: {e}")
 
-            try:
-                bot.edit_message_reply_markup(
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id,
-                    reply_markup=None
-                )
-            except Exception:
-                pass
-
+            bot.answer_callback_query(call.id, "Лид якунланди 🏁")
             return
 
         bot.answer_callback_query(call.id, "Номаълум амал")
+
     except Exception as e:
         logger.exception(f"callback_handler error: {e}")
         try:
@@ -722,32 +764,156 @@ def callback_handler(call):
             pass
 
 # =========================================================
-# POLLING LOOP
+# TEXT FLOW
+# =========================================================
+@bot.message_handler(content_types=["text"])
+def handle_text(message):
+    uid = message.from_user.id
+    ensure_user(uid)
+    text = (message.text or "").strip()
+
+    if text in SERVICE_BUTTONS or text in ["🌟 Махсус агент", "☎️ Алоқа", "⬅️ Орқага"]:
+        return
+
+    flow = user_state[uid]["flow"]
+
+    if flow == "regular":
+        step = user_state[uid]["step"]
+
+        if step == "full_name":
+            user_state[uid]["full_name"] = text
+            user_state[uid]["step"] = "phone"
+            bot.send_message(message.chat.id, "Телефон рақамингизни юборинг:", reply_markup=phone_keyboard())
+            return
+
+        if step == "phone":
+            user_state[uid]["phone"] = text
+            user_state[uid]["step"] = "comment"
+            bot.send_message(message.chat.id, "Қисқача изоҳ ёзинг:", reply_markup=back_keyboard())
+            return
+
+        if step == "comment":
+            user_state[uid]["comment"] = text
+            payload = {
+                "client_chat_id": message.chat.id,
+                "telegram_id": uid,
+                "username": safe_username(message.from_user),
+                "full_name": user_state[uid]["full_name"],
+                "phone": user_state[uid]["phone"],
+                "direction": user_state[uid]["direction"],
+                "comment": user_state[uid]["comment"],
+            }
+
+            lead_id = save_regular_lead(payload)
+            sent = notify_agents_about_lead(lead_id, payload)
+
+            bot.send_message(
+                message.chat.id,
+                (
+                    "✅ Сўровингиз қабул қилинди!\n\n"
+                    f"🆔 ID: <b>{lead_id}</b>\n"
+                    f"👨‍💼 Хабар юборилган агентлар: <b>{sent}</b>\n"
+                    "Тез орада сиз билан боғланишади."
+                ),
+                reply_markup=main_menu()
+            )
+
+            notify_admins(
+                f"📢 Янги лид тушди\n"
+                f"🆔 {lead_id}\n"
+                f"👤 {payload['full_name']}\n"
+                f"📞 {payload['phone']}\n"
+                f"📌 {payload['direction']}\n"
+                f"🧩 Версия: {APP_VERSION}"
+            )
+
+            reset_all(uid)
+            return
+
+    if flow == "special":
+        sa_step = user_state[uid]["sa_step"]
+
+        if sa_step == "sa_name":
+            user_state[uid]["sa_name"] = text
+            user_state[uid]["sa_step"] = "sa_phone"
+            bot.send_message(message.chat.id, "Телефон рақамингизни юборинг:", reply_markup=phone_keyboard())
+            return
+
+        if sa_step == "sa_phone":
+            user_state[uid]["sa_phone"] = text
+            user_state[uid]["sa_step"] = "sa_client_name"
+            bot.send_message(message.chat.id, "Мижоз исмини киритинг:", reply_markup=back_keyboard())
+            return
+
+        if sa_step == "sa_client_name":
+            user_state[uid]["sa_client_name"] = text
+            user_state[uid]["sa_step"] = "sa_client_phone"
+            bot.send_message(message.chat.id, "Мижоз телефон рақамини юборинг:", reply_markup=phone_keyboard())
+            return
+
+        if sa_step == "sa_client_phone":
+            user_state[uid]["sa_client_phone"] = text
+            user_state[uid]["sa_step"] = "sa_comment"
+            bot.send_message(message.chat.id, "Изоҳ ёзинг:", reply_markup=back_keyboard())
+            return
+
+        if sa_step == "sa_comment":
+            user_state[uid]["sa_comment"] = text
+
+            payload = {
+                "special_agent_name": user_state[uid]["sa_name"],
+                "special_agent_phone": user_state[uid]["sa_phone"],
+                "special_agent_telegram_id": uid,
+                "special_agent_username": safe_username(message.from_user),
+                "client_name": user_state[uid]["sa_client_name"],
+                "client_phone": user_state[uid]["sa_client_phone"],
+                "comment": user_state[uid]["sa_comment"]
+            }
+
+            sid = save_special_lead(payload)
+
+            bot.send_message(
+                message.chat.id,
+                f"✅ Махсус агент заявкаси қабул қилинди!\n\n🆔 ID: <b>{sid}</b>",
+                reply_markup=main_menu()
+            )
+
+            notify_admins(
+                "🌟 МАХСУС АГЕНТ ЗАЯВКАСИ\n\n"
+                f"🆔 ID: {sid}\n"
+                f"👤 Махсус агент: {payload['special_agent_name']}\n"
+                f"📞 Унинг рақами: {payload['special_agent_phone']}\n"
+                f"👤 Мижоз: {payload['client_name']}\n"
+                f"📞 Мижоз рақами: {payload['client_phone']}\n"
+                f"💬 Изоҳ: {payload['comment']}\n"
+                f"🔗 Username: @{payload['special_agent_username'] or '-'}\n"
+                f"🧩 Версия: {APP_VERSION}"
+            )
+
+            reset_all(uid)
+            return
+
+    bot.send_message(message.chat.id, "Керакли бўлимни менюдан танланг:", reply_markup=main_menu())
+
+# =========================================================
+# RUN
 # =========================================================
 def run_bot():
     init_sheets()
 
     try:
         bot.remove_webhook()
-        logger.info("Webhook removed")
     except Exception as e:
         logger.warning(f"remove_webhook error: {e}")
 
     while True:
         try:
-            logger.info("Polling started...")
-            bot.infinity_polling(
-                timeout=60,
-                long_polling_timeout=60,
-                skip_pending=True
-            )
+            logger.info(f"Polling started... version={APP_VERSION}")
+            bot.infinity_polling(timeout=60, long_polling_timeout=60, skip_pending=True)
         except Exception as e:
             logger.exception(f"Polling error: {e}")
             time.sleep(5)
 
-# =========================================================
-# MAIN
-# =========================================================
 if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
     run_bot()
