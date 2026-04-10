@@ -56,6 +56,7 @@ PROPERTY_OPTIONS = [
 
 IPOTEKA_OPTIONS = ["ҳа", "йўқ"]
 
+
 # =========================
 # FSM STATES
 # =========================
@@ -114,30 +115,64 @@ class SheetDB:
         await asyncio.to_thread(self._connect_sync)
 
     def _connect_sync(self):
-        creds = Credentials.from_service_account_info(settings.service_account_info, scopes=SCOPES)
+        creds = Credentials.from_service_account_info(
+            settings.service_account_info,
+            scopes=SCOPES,
+        )
         self.gc = gspread.authorize(creds)
         self.sh = self.gc.open_by_url(settings.spreadsheet_url)
         self.users_ws = self._get_or_create_ws(
             "Users",
             [
-                "tg_id", "full_name", "username", "phone", "role", "status",
-                "ref_by", "joined_at"
+                "tg_id",
+                "full_name",
+                "username",
+                "phone",
+                "role",
+                "status",
+                "ref_by",
+                "joined_at",
             ],
         )
         self.objects_ws = self._get_or_create_ws(
             "Objects",
             [
-                "object_id", "created_at", "created_by", "created_by_name", "status",
-                "address", "floor", "rooms", "ownership", "area", "purpose", "price",
-                "photo", "landmark", "mortgage", "down_payment", "property_type", "description"
+                "object_id",
+                "created_at",
+                "created_by",
+                "created_by_name",
+                "status",
+                "address",
+                "floor",
+                "rooms",
+                "ownership",
+                "area",
+                "purpose",
+                "price",
+                "photo",
+                "landmark",
+                "mortgage",
+                "down_payment",
+                "property_type",
+                "description",
             ],
         )
         self.leads_ws = self._get_or_create_ws(
             "Leads",
             [
-                "lead_id", "created_at", "client_tg_id", "client_name", "client_phone",
-                "purpose", "notes", "status", "assigned_agent_id", "assigned_agent_name",
-                "assigned_message_ids", "ref_by", "completed_at"
+                "lead_id",
+                "created_at",
+                "client_tg_id",
+                "client_name",
+                "client_phone",
+                "purpose",
+                "notes",
+                "status",
+                "assigned_agent_id",
+                "assigned_agent_name",
+                "assigned_message_ids",
+                "ref_by",
+                "completed_at",
             ],
         )
         self.settings_ws = self._get_or_create_ws(
@@ -151,6 +186,7 @@ class SheetDB:
         except gspread.WorksheetNotFound:
             ws = self.sh.add_worksheet(title=title, rows=1000, cols=max(len(headers), 20))
             ws.append_row(headers)
+
         existing = ws.row_values(1)
         if existing != headers:
             ws.clear()
@@ -167,13 +203,41 @@ class SheetDB:
                 return row
         return None
 
-    async def upsert_user(self, tg_id: int, full_name: str, username: str = "", phone: str = "", role: str = "client", status: str = "active", ref_by: str = ""):
-        await asyncio.to_thread(self._upsert_user_sync, tg_id, full_name, username, phone, role, status, ref_by)
+    async def upsert_user(
+        self,
+        tg_id: int,
+        full_name: str,
+        username: str = "",
+        phone: str = "",
+        role: str = "client",
+        status: str = "active",
+        ref_by: str = "",
+    ):
+        await asyncio.to_thread(
+            self._upsert_user_sync,
+            tg_id,
+            full_name,
+            username,
+            phone,
+            role,
+            status,
+            ref_by,
+        )
 
-    def _upsert_user_sync(self, tg_id: int, full_name: str, username: str, phone: str, role: str, status: str, ref_by: str):
+    def _upsert_user_sync(
+        self,
+        tg_id: int,
+        full_name: str,
+        username: str,
+        phone: str,
+        role: str,
+        status: str,
+        ref_by: str,
+    ):
         all_values = self.users_ws.get_all_values()
         joined_at = now_str()
         new_row = [str(tg_id), full_name, username, phone, role, status, ref_by, joined_at]
+
         for idx, row in enumerate(all_values[1:], start=2):
             if str(row[0]) == str(tg_id):
                 current = row + [""] * (8 - len(row))
@@ -186,6 +250,7 @@ class SheetDB:
                     current[6] = ref_by
                 self.users_ws.update(f"A{idx}:H{idx}", [current[:8]])
                 return
+
         self.users_ws.append_row(new_row)
 
     async def update_user_fields(self, tg_id: int, **fields):
@@ -201,7 +266,7 @@ class SheetDB:
                     if key in headers:
                         row[headers.index(key)] = str(value)
                 end_col = chr(64 + len(headers))
-                self.users_ws.update(f"A{idx}:{end_col}{idx}", [row[:len(headers)]])
+                self.users_ws.update(f"A{idx}:{end_col}{idx}", [row[: len(headers)]])
                 return
 
     async def list_agents(self, active_only: bool = True) -> List[Dict[str, Any]]:
@@ -323,7 +388,7 @@ class SheetDB:
                     if key in headers:
                         row[headers.index(key)] = str(value)
                 end_col = chr(64 + len(headers))
-                self.leads_ws.update(f"A{idx}:{end_col}{idx}", [row[:len(headers)]])
+                self.leads_ws.update(f"A{idx}:{end_col}{idx}", [row[: len(headers)]])
                 return
 
     async def stats(self) -> Dict[str, int]:
@@ -439,6 +504,7 @@ async def notify_agents_about_lead(lead_id: str):
     lead = await db.get_lead(lead_id)
     if not lead:
         return
+
     agents = await db.list_agents(active_only=True)
     msg_ids = []
     text = build_lead_text(
@@ -449,11 +515,13 @@ async def notify_agents_about_lead(lead_id: str):
         lead.get("notes", ""),
         lead.get("ref_by", ""),
     )
+
     for agent in agents:
         tg_id = int(agent.get("tg_id"))
         sent = await safe_send(tg_id, text, reply_markup=lead_action_kb(lead_id))
         if sent:
             msg_ids.append(f"{tg_id}:{sent.message_id}")
+
     if msg_ids:
         await db.update_lead(lead_id, assigned_message_ids="|".join(msg_ids))
 
@@ -462,6 +530,7 @@ async def close_other_messages(lead: Dict[str, Any], except_agent_id: Optional[i
     raw = lead.get("assigned_message_ids", "")
     if not raw:
         return
+
     for item in str(raw).split("|"):
         try:
             chat_id_str, message_id_str = item.split(":")
@@ -513,6 +582,7 @@ async def cmd_start(message: Message, command: CommandObject):
 async def cmd_admin(message: Message):
     if message.from_user.id not in settings.admins:
         return await message.answer("Бу бўлим фақат админ учун.")
+
     s = await db.stats()
     await message.answer(
         "📊 <b>Статистика</b>\n\n"
@@ -532,6 +602,7 @@ async def cmd_ref(message: Message):
     user = await db.get_user(message.from_user.id)
     if not user or user.get("role") not in ("agent", "admin"):
         return await message.answer("Бу функция агент ва админ учун.")
+
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start=ref_{message.from_user.id}"
     await message.answer(
@@ -554,6 +625,7 @@ async def request_agent_role(message: Message):
     user = await db.get_user(message.from_user.id)
     if user and user.get("role") == "agent" and user.get("status") == "active":
         return await message.answer("Сиз аллақачон актив агентсиз.")
+
     await db.upsert_user(
         tg_id=message.from_user.id,
         full_name=message.from_user.full_name,
@@ -576,12 +648,18 @@ async def request_agent_role(message: Message):
 async def approve_agent(call: CallbackQuery):
     if call.from_user.id not in settings.admins:
         return await call.answer("Фақат админ", show_alert=True)
+
     tg_id = int(call.data.split(":", 1)[1])
     user = await db.get_user(tg_id)
     if not user:
         return await call.answer("Фойдаланувчи топилмади", show_alert=True)
+
     await db.update_user_fields(tg_id, role="agent", status="active")
-    await safe_send(tg_id, "🎉 Табриклаймиз! Сиз агент сифатида тасдиқландингиз.", reply_markup=main_menu("agent"))
+    await safe_send(
+        tg_id,
+        "🎉 Табриклаймиз! Сиз агент сифатида тасдиқландингиз.",
+        reply_markup=main_menu("agent"),
+    )
     await call.message.edit_reply_markup(reply_markup=None)
     await call.answer("Тасдиқланди")
 
@@ -590,9 +668,14 @@ async def approve_agent(call: CallbackQuery):
 async def reject_agent(call: CallbackQuery):
     if call.from_user.id not in settings.admins:
         return await call.answer("Фақат админ", show_alert=True)
+
     tg_id = int(call.data.split(":", 1)[1])
     await db.update_user_fields(tg_id, role="client", status="active")
-    await safe_send(tg_id, "Сизнинг агент сўровингиз ҳозирча тасдиқланмади.", reply_markup=main_menu("client"))
+    await safe_send(
+        tg_id,
+        "Сизнинг агент сўровингиз ҳозирча тасдиқланмади.",
+        reply_markup=main_menu("client"),
+    )
     await call.message.edit_reply_markup(reply_markup=None)
     await call.answer("Бекор қилинди")
 
@@ -640,6 +723,7 @@ async def lead_notes(message: Message, state: FSMContext):
     data = await state.get_data()
     notes = message.text.strip()
     user = await db.get_user(message.from_user.id)
+
     await db.upsert_user(
         tg_id=message.from_user.id,
         full_name=data.get("full_name") or message.from_user.full_name,
@@ -649,6 +733,7 @@ async def lead_notes(message: Message, state: FSMContext):
         status=user.get("status", "active") if user else "active",
         ref_by=user.get("ref_by", "") if user else "",
     )
+
     lead_id = await db.create_lead(
         {
             "client_tg_id": message.from_user.id,
@@ -659,6 +744,7 @@ async def lead_notes(message: Message, state: FSMContext):
             "ref_by": user.get("ref_by", "") if user else "",
         }
     )
+
     await state.clear()
     await message.answer(
         f"✅ Заявкангиз қабул қилинди. ID: <b>{lead_id}</b>\nТез орада агент сиз билан боғланади.",
@@ -677,8 +763,10 @@ async def take_lead(call: CallbackQuery):
     lead = await db.get_lead(lead_id)
     if not lead:
         return await call.answer("Лид топилмади", show_alert=True)
+
     if lead.get("status") == "done":
         return await call.answer("Бу лид якунланган", show_alert=True)
+
     if lead.get("assigned_agent_id") and str(lead.get("assigned_agent_id")) != str(call.from_user.id):
         return await call.answer("Бу лидни бошқа агент олган", show_alert=True)
 
@@ -689,10 +777,12 @@ async def take_lead(call: CallbackQuery):
         assigned_agent_name=call.from_user.full_name,
     )
     await close_other_messages(lead, except_agent_id=call.from_user.id)
+
     try:
         await call.message.edit_reply_markup(reply_markup=lead_action_kb(lead_id))
     except TelegramBadRequest:
         pass
+
     await call.answer("Лид сизга бириктирилди")
     await safe_send(
         int(lead.get("client_tg_id")),
@@ -706,6 +796,7 @@ async def reject_lead(call: CallbackQuery):
     lead = await db.get_lead(lead_id)
     if not lead:
         return await call.answer("Лид топилмади", show_alert=True)
+
     if str(lead.get("assigned_agent_id") or "") not in ("", str(call.from_user.id)):
         return await call.answer("Бу лид сизга тегишли эмас", show_alert=True)
 
@@ -725,6 +816,7 @@ async def finish_lead(call: CallbackQuery):
     lead = await db.get_lead(lead_id)
     if not lead:
         return await call.answer("Лид топилмади", show_alert=True)
+
     if str(lead.get("assigned_agent_id") or "") != str(call.from_user.id):
         return await call.answer("Фақат лидни олган агент якунлай олади", show_alert=True)
 
@@ -750,6 +842,7 @@ async def start_object(message: Message, state: FSMContext):
     role = "admin" if message.from_user.id in settings.admins else (user.get("role") if user else "client")
     if role not in ("agent", "admin"):
         return await message.answer("Бу функция фақат агент ва админ учун.")
+
     await state.set_state(ObjectForm.address)
     await message.answer("Манзилни киритинг:", reply_markup=ReplyKeyboardRemove())
 
@@ -844,10 +937,13 @@ async def obj_done(message: Message, state: FSMContext):
     data["description"] = message.text.strip()
     data["created_by"] = message.from_user.id
     data["created_by_name"] = message.from_user.full_name
+
     object_id = await db.create_object(data)
     await state.clear()
+
     user = await db.get_user(message.from_user.id)
     role = "admin" if message.from_user.id in settings.admins else (user.get("role") if user else "client")
+
     await message.answer(
         f"✅ Объект сақланди. ID: <b>{object_id}</b>\nСтатус: pending",
         reply_markup=main_menu(role),
@@ -861,7 +957,10 @@ async def obj_done(message: Message, state: FSMContext):
 @dp.message(F.text == "🔎 Объект қидириш")
 async def start_search(message: Message, state: FSMContext):
     await state.set_state(SearchForm.keyword)
-    await message.answer("Қидирув учун калит сўз киритинг (масалан: 3 хона, ипотека, GK-001, манзил):", reply_markup=ReplyKeyboardRemove())
+    await message.answer(
+        "Қидирув учун калит сўз киритинг (масалан: 3 хона, ипотека, GK-001, манзил):",
+        reply_markup=ReplyKeyboardRemove(),
+    )
 
 
 @dp.message(SearchForm.keyword)
@@ -869,8 +968,10 @@ async def do_search(message: Message, state: FSMContext):
     keyword = message.text.strip()
     results = await db.search_objects(keyword)
     await state.clear()
+
     user = await db.get_user(message.from_user.id)
     role = "admin" if message.from_user.id in settings.admins else (user.get("role") if user else "client")
+
     if not results:
         return await message.answer("Ҳеч нарса топилмади.", reply_markup=main_menu(role))
 
@@ -910,6 +1011,7 @@ async def do_search(message: Message, state: FSMContext):
                 f"💰 Бош тўлов: {row.get('down_payment')}"
             )
         await message.answer(text)
+
     await message.answer("Қидирув якунланди.", reply_markup=main_menu(role))
 
 
@@ -934,17 +1036,29 @@ async def fallback(message: Message):
 # =========================
 # HEALTHCHECK
 # =========================
-async def health(request):
-    return web.json_response({"ok": True, "service": "gk-railway-bot", "time": now_str()})
+async def health_handler(request: web.Request) -> web.Response:
+    return web.json_response(
+        {
+            "ok": True,
+            "service": "gk-railway-bot",
+            "time": now_str(),
+        }
+    )
 
 
 async def start_http_server():
     app = web.Application()
-    app.router.add_get("/", health)
-    app.router.add_get("/health", health)
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/health", health_handler)
+
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, host="0.0.0.0", port=settings.health_port)
+
+    site = web.TCPSite(
+        runner,
+        host="0.0.0.0",
+        port=settings.health_port,
+    )
     await site.start()
     logger.info("Healthcheck server started on :%s", settings.health_port)
 
@@ -959,21 +1073,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-from fastapi import FastAPI
-import threading
-
-app = FastAPI()
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-def run_bot():
-    import asyncio
-    from aiogram import Dispatcher, Bot
-
-    # сендаги dp ва bot шу ерда бўлади
-    asyncio.run(dp.start_polling(bot))
-
-
-import threading
-threading.Thread(target=run_bot).start()

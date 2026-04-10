@@ -4,5 +4,4 @@ aiohttp==3.11.18
 gspread==6.2.1
 google-auth==2.40.1
 python-dotenv==1.1.0
-fastapi
-uvicorn
+
