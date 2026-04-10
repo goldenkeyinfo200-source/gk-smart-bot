@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 import gspread
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
@@ -464,7 +465,10 @@ def admin_approve_kb(tg_id: int) -> InlineKeyboardMarkup:
     )
 
 
-bot = Bot(token=settings.bot_token, parse_mode=ParseMode.HTML)
+bot = Bot(
+    token=settings.bot_token,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
 dp = Dispatcher(storage=MemoryStorage())
 db = SheetDB()
 
@@ -1021,8 +1025,8 @@ async def start_http_server():
 
 async def main():
     validate_settings()
-    await db.connect()
     await start_http_server()
+    await db.connect()
     logger.info("Bot polling started")
     await dp.start_polling(bot)
 

@@ -1,35 +1,43 @@
 import json
 import os
-from dataclasses import dataclass, field
-from typing import List
+from dataclasses import dataclass
+from typing import Any, Dict, List
 
 
-def _split_csv(value: str) -> List[int]:
-    if not value:
-        return []
-    return [int(x.strip()) for x in value.split(',') if x.strip()]
+def _parse_admin_ids(raw: str) -> List[int]:
+    ids: List[int] = []
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.append(int(part))
+    return ids
+
+
+def _load_service_account_info() -> Dict[str, Any]:
+    raw = os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
+    if not raw:
+        return {}
+    return json.loads(raw)
 
 
 @dataclass
 class Settings:
-    bot_token: str = os.getenv("BOT_TOKEN", "")
-    spreadsheet_url: str = os.getenv("SPREADSHEET_URL", "")
-    admins: List[int] = field(default_factory=lambda: _split_csv(os.getenv("ADMIN_IDS", "")))
-    public_base_url: str = os.getenv("PUBLIC_BASE_URL", "")
-    health_port: int = int(os.getenv("PORT", "8080"))
-    timezone: str = os.getenv("TIMEZONE", "Asia/Tashkent")
-    company_name: str = os.getenv("COMPANY_NAME", "Golden Key Ipoteka")
-    contact_phone: str = os.getenv("CONTACT_PHONE", "+998999997973")
-
-    @property
-    def service_account_info(self) -> dict:
-        raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-        if not raw:
-            return {}
-        return json.loads(raw)
+    bot_token: str
+    spreadsheet_url: str
+    service_account_info: Dict[str, Any]
+    admins: List[int]
+    company_name: str
+    contact_phone: str
 
 
-settings = Settings()
+settings = Settings(
+    bot_token=os.getenv("BOT_TOKEN", "").strip(),
+    spreadsheet_url=os.getenv("SPREADSHEET_URL", "").strip(),
+    service_account_info=_load_service_account_info(),
+    admins=_parse_admin_ids(os.getenv("ADMIN_IDS", "")),
+    company_name=os.getenv("COMPANY_NAME", "Golden Key"),
+    contact_phone=os.getenv("CONTACT_PHONE", "+998 99 999 79 73"),
+)
 
 
 def validate_settings() -> None:
@@ -39,6 +47,9 @@ def validate_settings() -> None:
     if not settings.spreadsheet_url:
         missing.append("SPREADSHEET_URL")
     if not settings.service_account_info:
-        missing.append("GOOGLE_SERVICE_ACCOUNT_JSON")
+        missing.append("GOOGLE_CREDENTIALS_JSON")
+    if not settings.admins:
+        missing.append("ADMIN_IDS")
+
     if missing:
-        raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
+        raise ValueError("Missing required environment variables: " + ", ".join(missing))
