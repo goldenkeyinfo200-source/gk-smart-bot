@@ -959,3 +959,21 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+from fastapi import FastAPI
+import threading
+
+app = FastAPI()
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+def run_bot():
+    import asyncio
+    from aiogram import Dispatcher, Bot
+
+    # сендаги dp ва bot шу ерда бўлади
+    asyncio.run(dp.start_polling(bot))
+
+
+import threading
+threading.Thread(target=run_bot).start()
