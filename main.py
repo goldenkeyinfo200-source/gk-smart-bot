@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -46,20 +47,9 @@ PURPOSE_OPTIONS = [
     "ижарага олиш учун",
 ]
 
-PROPERTY_OPTIONS = [
-    "квартира",
-    "ҳовли",
-    "ер",
-    "нотурар жой",
-    "офис",
-]
-
 IPOTEKA_OPTIONS = ["ҳа", "йўқ"]
 
 
-# =========================
-# FSM STATES
-# =========================
 class LeadForm(StatesGroup):
     full_name = State()
     phone = State()
@@ -87,9 +77,6 @@ class SearchForm(StatesGroup):
     keyword = State()
 
 
-# =========================
-# GOOGLE SHEETS STORAGE
-# =========================
 @dataclass
 class UserRow:
     tg_id: int
@@ -121,6 +108,7 @@ class SheetDB:
         )
         self.gc = gspread.authorize(creds)
         self.sh = self.gc.open_by_url(settings.spreadsheet_url)
+
         self.users_ws = self._get_or_create_ws(
             "Users",
             [
@@ -175,10 +163,7 @@ class SheetDB:
                 "completed_at",
             ],
         )
-        self.settings_ws = self._get_or_create_ws(
-            "Settings",
-            ["key", "value"],
-        )
+        self.settings_ws = self._get_or_create_ws("Settings", ["key", "value"])
 
     def _get_or_create_ws(self, title: str, headers: List[str]):
         try:
@@ -266,7 +251,7 @@ class SheetDB:
                     if key in headers:
                         row[headers.index(key)] = str(value)
                 end_col = chr(64 + len(headers))
-                self.users_ws.update(f"A{idx}:{end_col}{idx}", [row[: len(headers)]])
+                self.users_ws.update(f"A{idx}:{end_col}{idx}", [row[:len(headers)]])
                 return
 
     async def list_agents(self, active_only: bool = True) -> List[Dict[str, Any]]:
@@ -388,7 +373,7 @@ class SheetDB:
                     if key in headers:
                         row[headers.index(key)] = str(value)
                 end_col = chr(64 + len(headers))
-                self.leads_ws.update(f"A{idx}:{end_col}{idx}", [row[: len(headers)]])
+                self.leads_ws.update(f"A{idx}:{end_col}{idx}", [row[:len(headers)]])
                 return
 
     async def stats(self) -> Dict[str, int]:
@@ -410,9 +395,6 @@ class SheetDB:
         }
 
 
-# =========================
-# HELPERS
-# =========================
 def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -546,9 +528,6 @@ async def close_other_messages(lead: Dict[str, Any], except_agent_id: Optional[i
             continue
 
 
-# =========================
-# COMMANDS
-# =========================
 @dp.message(Command("start"))
 async def cmd_start(message: Message, command: CommandObject):
     ref_by = ""
@@ -612,9 +591,6 @@ async def cmd_ref(message: Message):
     )
 
 
-# =========================
-# MENUS
-# =========================
 @dp.message(F.text == "📊 Админ статистика")
 async def admin_stats_button(message: Message):
     await cmd_admin(message)
@@ -680,9 +656,6 @@ async def reject_agent(call: CallbackQuery):
     await call.answer("Бекор қилинди")
 
 
-# =========================
-# LEAD FLOW
-# =========================
 @dp.message(F.text == "📝 Заявка қолдириш")
 async def start_lead(message: Message, state: FSMContext):
     await state.set_state(LeadForm.full_name)
@@ -754,9 +727,6 @@ async def lead_notes(message: Message, state: FSMContext):
     await notify_admins(f"📥 Янги лид яратилди: <b>{lead_id}</b>")
 
 
-# =========================
-# LEAD ACTIONS
-# =========================
 @dp.callback_query(F.data.startswith("lead_take:"))
 async def take_lead(call: CallbackQuery):
     lead_id = call.data.split(":", 1)[1]
@@ -833,9 +803,6 @@ async def finish_lead(call: CallbackQuery):
         )
 
 
-# =========================
-# OBJECT FLOW
-# =========================
 @dp.message(F.text == "🏠 Объект қўшиш")
 async def start_object(message: Message, state: FSMContext):
     user = await db.get_user(message.from_user.id)
@@ -951,9 +918,6 @@ async def obj_done(message: Message, state: FSMContext):
     await notify_admins(f"🏠 Янги объект қўшилди: <b>{object_id}</b>")
 
 
-# =========================
-# SEARCH OBJECTS
-# =========================
 @dp.message(F.text == "🔎 Объект қидириш")
 async def start_search(message: Message, state: FSMContext):
     await state.set_state(SearchForm.keyword)
@@ -1020,9 +984,6 @@ async def menu_ref(message: Message):
     await cmd_ref(message)
 
 
-# =========================
-# FALLBACK
-# =========================
 @dp.message()
 async def fallback(message: Message):
     user = await db.get_user(message.from_user.id)
@@ -1033,9 +994,6 @@ async def fallback(message: Message):
     )
 
 
-# =========================
-# HEALTHCHECK
-# =========================
 async def health_handler(request: web.Request) -> web.Response:
     return web.json_response(
         {
@@ -1054,13 +1012,11 @@ async def start_http_server():
     runner = web.AppRunner(app)
     await runner.setup()
 
-    site = web.TCPSite(
-        runner,
-        host="0.0.0.0",
-        port=settings.health_port,
-    )
+    port = int(os.getenv("PORT", "8080"))
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
     await site.start()
-    logger.info("Healthcheck server started on :%s", settings.health_port)
+
+    logger.info("Healthcheck server started on :%s", port)
 
 
 async def main():
