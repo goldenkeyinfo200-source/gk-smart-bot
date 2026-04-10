@@ -41,8 +41,11 @@ logger = logging.getLogger("gk_crm_pro")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 SPREADSHEET_URL = os.getenv("SPREADSHEET_URL", "").strip()
 CONTACT_PHONE = os.getenv("CONTACT_PHONE", "+998999997973").strip()
+
+# Credentials: 3 xil variantni қабул қилади
 GOOGLE_SERVICE_FILE = os.getenv("GOOGLE_SERVICE_FILE", "").strip()
 GSPREAD_CREDENTIALS_JSON = os.getenv("GSPREAD_CREDENTIALS_JSON", "").strip()
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN topilmadi")
@@ -82,16 +85,39 @@ SCOPES = [
 ]
 
 def get_gspread_client():
-    if GOOGLE_SERVICE_FILE and os.path.exists(GOOGLE_SERVICE_FILE):
-        creds = Credentials.from_service_account_file(GOOGLE_SERVICE_FILE, scopes=SCOPES)
-        return gspread.authorize(creds)
-
+    # 1) GSPREAD_CREDENTIALS_JSON
     if GSPREAD_CREDENTIALS_JSON:
-        info = json.loads(GSPREAD_CREDENTIALS_JSON)
-        creds = Credentials.from_service_account_info(info, scopes=SCOPES)
-        return gspread.authorize(creds)
+        try:
+            info = json.loads(GSPREAD_CREDENTIALS_JSON)
+            creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+            logger.info("Using GSPREAD_CREDENTIALS_JSON")
+            return gspread.authorize(creds)
+        except Exception as e:
+            logger.exception("GSPREAD_CREDENTIALS_JSON error: %s", e)
 
-    raise RuntimeError("Google credentials topilmadi. GOOGLE_SERVICE_FILE yoki GSPREAD_CREDENTIALS_JSON kerak.")
+    # 2) GOOGLE_CREDENTIALS_JSON
+    if GOOGLE_CREDENTIALS_JSON:
+        try:
+            info = json.loads(GOOGLE_CREDENTIALS_JSON)
+            creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+            logger.info("Using GOOGLE_CREDENTIALS_JSON")
+            return gspread.authorize(creds)
+        except Exception as e:
+            logger.exception("GOOGLE_CREDENTIALS_JSON error: %s", e)
+
+    # 3) GOOGLE_SERVICE_FILE
+    if GOOGLE_SERVICE_FILE and os.path.exists(GOOGLE_SERVICE_FILE):
+        try:
+            creds = Credentials.from_service_account_file(GOOGLE_SERVICE_FILE, scopes=SCOPES)
+            logger.info("Using GOOGLE_SERVICE_FILE")
+            return gspread.authorize(creds)
+        except Exception as e:
+            logger.exception("GOOGLE_SERVICE_FILE error: %s", e)
+
+    raise RuntimeError(
+        "Google credentials topilmadi. "
+        "GSPREAD_CREDENTIALS_JSON yoki GOOGLE_CREDENTIALS_JSON yoki GOOGLE_SERVICE_FILE kerak."
+    )
 
 gc = get_gspread_client()
 sh = gc.open_by_url(SPREADSHEET_URL)
@@ -100,7 +126,7 @@ def get_or_create_ws(title: str, headers: List[str]):
     try:
         ws = sh.worksheet(title)
     except Exception:
-        ws = sh.add_worksheet(title=title, rows=2000, cols=max(20, len(headers) + 5))
+        ws = sh.add_worksheet(title=title, rows=3000, cols=max(20, len(headers) + 5))
         ws.append_row(headers)
         return ws
 
@@ -223,18 +249,10 @@ def init_default_settings():
     set_setting_if_missing("contact_phone", CONTACT_PHONE)
     set_setting_if_missing("special_bonus_amount", "100000")
     set_setting_if_missing("bonus_currency", "UZS")
-    set_setting_if_missing("special_bonus_text", "Siz yuborgan mijozning ishi yakunlandi. Bonusni ofisdan olib ketishingiz mumkin.")
-
-def parse_sheet_datetime(v: Any) -> Optional[datetime]:
-    s = clean_text(v)
-    if not s:
-        return None
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(s, fmt)
-        except Exception:
-            pass
-    return None
+    set_setting_if_missing(
+        "special_bonus_text",
+        "Siz yuborgan mijozning ishi yakunlandi. Bonusni ofisdan olib ketishingiz mumkin."
+    )
 
 init_default_settings()
 
@@ -313,7 +331,6 @@ def get_active_agents() -> List[Dict[str, Any]]:
     for row in get_records(agents_ws):
         tg_id = clean_text(row.get("telegram_id"))
         is_active = clean_text(row.get("is_active")).lower()
-
         if tg_id.isdigit() and is_active in ("true", "1", "yes", "ha", "active"):
             rows.append(row)
     return rows
@@ -740,7 +757,10 @@ async def notify_special_agent_bonus(lead: Dict[str, Any], lead_id: str):
             if tg_id.isdigit():
                 bonus_amount = get_setting("special_bonus_amount", "100000")
                 currency = get_setting("bonus_currency", "UZS")
-                bonus_text = get_setting("special_bonus_text", "Siz yuborgan mijozning ishi yakunlandi. Bonusni ofisdan olib ketishingiz mumkin.")
+                bonus_text = get_setting(
+                    "special_bonus_text",
+                    "Siz yuborgan mijozning ishi yakunlandi. Bonusni ofisdan olib ketishingiz mumkin."
+                )
                 try:
                     await bot.send_message(
                         int(tg_id),
@@ -1038,8 +1058,7 @@ async def special_agent_phone_handler(message: Message, state: FSMContext):
             "✅ Сиз махсус агент сифатида рўйхатдан ўтдингиз.\n\n"
             f"🆔 ID: <code>{escape(sp['special_agent_id'])}</code>\n"
             f"🔗 Шахсий линк:\n{escape(link)}\n\n"
-            "Мижозни шу линк орқали юборинг."
-            ,
+            "Мижозни шу линк орқали юборинг.",
             reply_markup=main_menu()
         )
         await notify_admins(
