@@ -48,30 +48,12 @@ PURPOSE_OPTIONS = [
     "ижарага олиш учун",
 ]
 
-IPOTEKA_OPTIONS = ["ҳа", "йўқ"]
-
 
 class LeadForm(StatesGroup):
     full_name = State()
     phone = State()
     purpose = State()
     notes = State()
-
-
-class ObjectForm(StatesGroup):
-    address = State()
-    floor = State()
-    rooms = State()
-    ownership = State()
-    area = State()
-    purpose = State()
-    price = State()
-    photo = State()
-    landmark = State()
-    mortgage = State()
-    down_payment = State()
-    property_type = State()
-    description = State()
 
 
 class SearchForm(StatesGroup):
@@ -268,44 +250,6 @@ class SheetDB:
                 out.append(row)
         return out
 
-    async def create_object(self, data: Dict[str, Any]) -> str:
-        return await asyncio.to_thread(self._create_object_sync, data)
-
-    def _create_object_sync(self, data: Dict[str, Any]) -> str:
-        object_id = self._next_object_id()
-        row = [
-            object_id,
-            now_str(),
-            str(data.get("created_by", "")),
-            data.get("created_by_name", ""),
-            "pending",
-            data.get("address", ""),
-            data.get("floor", ""),
-            data.get("rooms", ""),
-            data.get("ownership", ""),
-            data.get("area", ""),
-            data.get("purpose", ""),
-            data.get("price", ""),
-            data.get("photo", ""),
-            data.get("landmark", ""),
-            data.get("mortgage", ""),
-            data.get("down_payment", ""),
-            data.get("property_type", ""),
-            data.get("description", ""),
-        ]
-        self.objects_ws.append_row(row)
-        return object_id
-
-    def _next_object_id(self) -> str:
-        records = self.objects_ws.get_all_records()
-        max_num = 0
-        for row in records:
-            oid = str(row.get("object_id", ""))
-            m = re.match(r"GK-(\d+)", oid)
-            if m:
-                max_num = max(max_num, int(m.group(1)))
-        return f"GK-{max_num + 1:03d}"
-
     async def search_objects(self, keyword: str) -> List[Dict[str, Any]]:
         return await asyncio.to_thread(self._search_objects_sync, keyword)
 
@@ -315,7 +259,7 @@ class SheetDB:
         results = []
         for row in records:
             hay = " ".join(str(v) for v in row.values()).lower()
-            if k in hay and row.get("status") in ("pending", "active"):
+            if k in hay and row.get("status") in ("pending", "active", "ready"):
                 results.append(row)
         return results[:20]
 
@@ -424,11 +368,6 @@ def main_menu(role: str) -> ReplyKeyboardMarkup:
 
 def purpose_kb() -> ReplyKeyboardMarkup:
     rows = [[KeyboardButton(text=x)] for x in PURPOSE_OPTIONS]
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, one_time_keyboard=True)
-
-
-def mortgage_kb() -> ReplyKeyboardMarkup:
-    rows = [[KeyboardButton(text=x)] for x in IPOTEKA_OPTIONS]
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, one_time_keyboard=True)
 
 
@@ -758,10 +697,12 @@ async def take_lead(call: CallbackQuery):
         pass
 
     await call.answer("Лид сизга бириктирилди")
-    await safe_send(
-        int(lead.get("client_tg_id")),
-        f"✅ Сизнинг заявкангиз агент <b>{call.from_user.full_name}</b> га бириктирилди. Яқин орада сиз билан боғланишади.",
-    )
+    client_tg_id = str(lead.get("client_tg_id") or "").strip()
+    if client_tg_id.isdigit():
+        await safe_send(
+            int(client_tg_id),
+            f"✅ Сизнинг заявкангиз агент <b>{call.from_user.full_name}</b> га бириктирилди. Яқин орада сиз билан боғланишади.",
+        )
 
 
 @dp.callback_query(F.data.startswith("lead_reject:"))
@@ -797,7 +738,10 @@ async def finish_lead(call: CallbackQuery):
     await db.update_lead(lead_id, status="done", completed_at=now_str())
     await close_other_messages(lead)
     await call.answer("Лид якунланди")
-    await safe_send(int(lead.get("client_tg_id")), "🏁 Сизнинг мурожаатингиз якунланди. Раҳмат!")
+
+    client_tg_id = str(lead.get("client_tg_id") or "").strip()
+    if client_tg_id.isdigit():
+        await safe_send(client_tg_id and int(client_tg_id), "🏁 Сизнинг мурожаатингиз якунланди. Раҳмат!")
 
     ref_by = str(lead.get("ref_by") or "").strip()
     if ref_by.isdigit():
@@ -808,118 +752,23 @@ async def finish_lead(call: CallbackQuery):
 
 
 @dp.message(F.text == "🏠 Объект қўшиш")
-async def start_object(message: Message, state: FSMContext):
+async def start_object(message: Message):
     user = await db.get_user(message.from_user.id)
     role = "admin" if message.from_user.id in settings.admins else (user.get("role") if user else "client")
+
     if role not in ("agent", "admin"):
         return await message.answer("Бу функция фақат агент ва админ учун.")
 
-    await state.set_state(ObjectForm.address)
-    await message.answer("Манзилни киритинг:", reply_markup=ReplyKeyboardRemove())
+    appsheet_link = settings.appsheet_url
 
-
-@dp.message(ObjectForm.address)
-async def obj_address(message: Message, state: FSMContext):
-    await state.update_data(address=message.text.strip())
-    await state.set_state(ObjectForm.floor)
-    await message.answer("Қавати:")
-
-
-@dp.message(ObjectForm.floor)
-async def obj_floor(message: Message, state: FSMContext):
-    await state.update_data(floor=message.text.strip())
-    await state.set_state(ObjectForm.rooms)
-    await message.answer("Хоналар сони:")
-
-
-@dp.message(ObjectForm.rooms)
-async def obj_rooms(message: Message, state: FSMContext):
-    await state.update_data(rooms=message.text.strip())
-    await state.set_state(ObjectForm.ownership)
-    await message.answer("Мулкчилик шакли:")
-
-
-@dp.message(ObjectForm.ownership)
-async def obj_ownership(message: Message, state: FSMContext):
-    await state.update_data(ownership=message.text.strip())
-    await state.set_state(ObjectForm.area)
-    await message.answer("Майдони:")
-
-
-@dp.message(ObjectForm.area)
-async def obj_area(message: Message, state: FSMContext):
-    await state.update_data(area=message.text.strip())
-    await state.set_state(ObjectForm.purpose)
-    await message.answer("Мақсади:", reply_markup=purpose_kb())
-
-
-@dp.message(ObjectForm.purpose)
-async def obj_purpose(message: Message, state: FSMContext):
-    await state.update_data(purpose=message.text.strip())
-    await state.set_state(ObjectForm.price)
-    await message.answer("Нархи:", reply_markup=ReplyKeyboardRemove())
-
-
-@dp.message(ObjectForm.price)
-async def obj_price(message: Message, state: FSMContext):
-    await state.update_data(price=message.text.strip())
-    await state.set_state(ObjectForm.photo)
-    await message.answer("Фото линк:")
-
-
-@dp.message(ObjectForm.photo)
-async def obj_photo(message: Message, state: FSMContext):
-    await state.update_data(photo=message.text.strip())
-    await state.set_state(ObjectForm.landmark)
-    await message.answer("Мўлжал:")
-
-
-@dp.message(ObjectForm.landmark)
-async def obj_landmark(message: Message, state: FSMContext):
-    await state.update_data(landmark=message.text.strip())
-    await state.set_state(ObjectForm.mortgage)
-    await message.answer("Ипотека:", reply_markup=mortgage_kb())
-
-
-@dp.message(ObjectForm.mortgage)
-async def obj_mortgage(message: Message, state: FSMContext):
-    await state.update_data(mortgage=message.text.strip())
-    await state.set_state(ObjectForm.down_payment)
-    await message.answer("Бош тўлов:", reply_markup=ReplyKeyboardRemove())
-
-
-@dp.message(ObjectForm.down_payment)
-async def obj_down(message: Message, state: FSMContext):
-    await state.update_data(down_payment=message.text.strip())
-    await state.set_state(ObjectForm.property_type)
-    await message.answer("Тури (квартира/ҳовли/ер/...):")
-
-
-@dp.message(ObjectForm.property_type)
-async def obj_type(message: Message, state: FSMContext):
-    await state.update_data(property_type=message.text.strip())
-    await state.set_state(ObjectForm.description)
-    await message.answer("Қўшимча тавсиф:")
-
-
-@dp.message(ObjectForm.description)
-async def obj_done(message: Message, state: FSMContext):
-    data = await state.get_data()
-    data["description"] = message.text.strip()
-    data["created_by"] = message.from_user.id
-    data["created_by_name"] = message.from_user.full_name
-
-    object_id = await db.create_object(data)
-    await state.clear()
-
-    user = await db.get_user(message.from_user.id)
-    role = "admin" if message.from_user.id in settings.admins else (user.get("role") if user else "client")
-
-    await message.answer(
-        f"✅ Объект сақланди. ID: <b>{object_id}</b>\nСтатус: pending",
-        reply_markup=main_menu(role),
+    text = (
+        "🏠 <b>Объект қўшиш</b>\n\n"
+        "Қуйидаги AppSheet линк орқали объект маълумотларини киритинг:\n\n"
+        f"{appsheet_link}\n\n"
+        "✅ Объект сақлангач, у Project 2 орқали базага тушади ва автомат постга юборилади."
     )
-    await notify_admins(f"🏠 Янги объект қўшилди: <b>{object_id}</b>")
+
+    await message.answer(text, disable_web_page_preview=True)
 
 
 @dp.message(F.text == "🔎 Объект қидириш")

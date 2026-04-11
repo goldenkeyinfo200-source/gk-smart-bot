@@ -28,6 +28,7 @@ class Settings:
     admins: List[int]
     company_name: str
     contact_phone: str
+    appsheet_url: str
 
 
 settings = Settings(
@@ -37,6 +38,10 @@ settings = Settings(
     admins=_parse_admin_ids(os.getenv("ADMIN_IDS", "")),
     company_name=os.getenv("COMPANY_NAME", "Golden Key"),
     contact_phone=os.getenv("CONTACT_PHONE", "+998 99 999 79 73"),
+    appsheet_url=os.getenv(
+        "APPSHEET_URL",
+        "https://www.appsheet.com/newshortcut/dc1264d0-916b-4c02-a3f1-50fb175962b5",
+    ).strip(),
 )
 
 
@@ -50,6 +55,8 @@ def validate_settings() -> None:
         missing.append("GOOGLE_CREDENTIALS_JSON")
     if not settings.admins:
         missing.append("ADMIN_IDS")
+    if not settings.appsheet_url:
+        missing.append("APPSHEET_URL")
 
     if missing:
         raise ValueError("Missing required environment variables: " + ", ".join(missing))
