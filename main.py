@@ -75,11 +75,14 @@ class UserRow:
 class SheetDB:
     def __init__(self):
         self.gc = None
-        self.sh = None
+
+        self.main_sh = None
+        self.props_sh = None
+
         self.users_ws = None
-        self.objects_ws = None
         self.leads_ws = None
         self.settings_ws = None
+        self.objects_ws = None
 
     async def connect(self):
         await asyncio.to_thread(self._connect_sync)
@@ -90,9 +93,15 @@ class SheetDB:
             scopes=SCOPES,
         )
         self.gc = gspread.authorize(creds)
-        self.sh = self.gc.open_by_url(settings.spreadsheet_url)
+
+        # 1-шит: Users / Leads / Settings
+        self.main_sh = self.gc.open_by_url(settings.spreadsheet_url)
+
+        # 2-шит: Properties
+        self.props_sh = self.gc.open_by_url(settings.properties_spreadsheet_url)
 
         self.users_ws = self._get_or_create_ws(
+            self.main_sh,
             "Users",
             [
                 "tg_id",
@@ -107,6 +116,7 @@ class SheetDB:
         )
 
         self.leads_ws = self._get_or_create_ws(
+            self.main_sh,
             "Leads",
             [
                 "lead_id",
@@ -125,22 +135,72 @@ class SheetDB:
             ],
         )
 
-        self.settings_ws = self._get_or_create_ws("Settings", ["key", "value"])
+        self.settings_ws = self._get_or_create_ws(
+            self.main_sh,
+            "Settings",
+            ["key", "value"],
+        )
 
-        # AppSheet ва Apps Script ишлатаётган асосий объектлар варағи
-        self.objects_ws = self.sh.worksheet("Properties")
+        self.objects_ws = self._get_or_create_ws(
+            self.props_sh,
+            "Properties",
+            [
+                "ID",
+                "created_at",
+                "lead_id",
+                "created_by_agent_id",
+                "created_by_agent_name",
+                "owner_name",
+                "Phone",
+                "property_type",
+                "Purpose",
+                "street_raw",
+                "street_normalized",
+                "Address",
+                "district",
+                "Rooms",
+                "Floor",
+                "total_floors",
+                "Area",
+                "Price",
+                "currency",
+                "ownership",
+                "renovation",
+                "Mortgage",
+                "InitialPayment",
+                "Landmark",
+                "description",
+                "photo_1",
+                "photo_2",
+                "photo_3",
+                "photo_4",
+                "photo_5",
+                "photo_6",
+                "photo_7",
+                "photo_8",
+                "photo_9",
+                "photo_10",
+                "ready_post",
+                "post_status",
+                "telegram_message_id",
+                "Status",
+                "SENT",
+                "LocationUrl",
+            ],
+        )
 
-    def _get_or_create_ws(self, title: str, headers: List[str]):
+    def _get_or_create_ws(self, spreadsheet, title: str, headers: List[str]):
         try:
-            ws = self.sh.worksheet(title)
+            ws = spreadsheet.worksheet(title)
         except gspread.WorksheetNotFound:
-            ws = self.sh.add_worksheet(title=title, rows=1000, cols=max(len(headers), 20))
+            ws = spreadsheet.add_worksheet(title=title, rows=1000, cols=max(len(headers), 20))
             ws.append_row(headers)
+            return ws
 
         existing = ws.row_values(1)
-        if existing != headers:
-            ws.clear()
+        if not existing:
             ws.append_row(headers)
+
         return ws
 
     async def get_user(self, tg_id: int) -> Optional[Dict[str, Any]]:
@@ -209,6 +269,7 @@ class SheetDB:
     def _update_user_fields_sync(self, tg_id: int, fields: Dict[str, Any]):
         headers = self.users_ws.row_values(1)
         all_values = self.users_ws.get_all_values()
+
         for idx, row in enumerate(all_values[1:], start=2):
             if str(row[0]) == str(tg_id):
                 row = row + [""] * (len(headers) - len(row))
@@ -225,11 +286,13 @@ class SheetDB:
     def _list_agents_sync(self, active_only: bool) -> List[Dict[str, Any]]:
         records = self.users_ws.get_all_records()
         out = []
+
         for row in records:
             if row.get("role") == "agent":
                 if active_only and row.get("status") != "active":
                     continue
                 out.append(row)
+
         return out
 
     async def search_objects(self, keyword: str) -> List[Dict[str, Any]]:
@@ -278,11 +341,13 @@ class SheetDB:
     def _next_lead_id(self) -> str:
         records = self.leads_ws.get_all_records()
         max_num = 0
+
         for row in records:
             lid = str(row.get("lead_id", ""))
             m = re.match(r"LD-(\d+)", lid)
             if m:
                 max_num = max(max_num, int(m.group(1)))
+
         return f"LD-{max_num + 1:03d}"
 
     async def get_lead(self, lead_id: str) -> Optional[Dict[str, Any]]:
@@ -300,6 +365,7 @@ class SheetDB:
     def _update_lead_sync(self, lead_id: str, fields: Dict[str, Any]):
         headers = self.leads_ws.row_values(1)
         all_values = self.leads_ws.get_all_values()
+
         for idx, row in enumerate(all_values[1:], start=2):
             if row and row[0] == lead_id:
                 row = row + [""] * (len(headers) - len(row))
@@ -317,6 +383,7 @@ class SheetDB:
         users = self.users_ws.get_all_records()
         leads = self.leads_ws.get_all_records()
         objects = self.objects_ws.get_all_records()
+
         return {
             "users": len(users),
             "agents": sum(1 for x in users if x.get("role") == "agent" and x.get("status") == "active"),
@@ -346,12 +413,16 @@ def main_menu(role: str) -> ReplyKeyboardMarkup:
         [KeyboardButton(text="📝 Заявка қолдириш"), KeyboardButton(text="🔎 Объект қидириш")],
         [KeyboardButton(text=f"📞 Алоқа: {settings.contact_phone}")],
     ]
+
     if role in ("agent", "admin"):
         rows.insert(1, [KeyboardButton(text="🏠 Объект қўшиш"), KeyboardButton(text="🔗 Махсус агент линк")])
+
     if role == "client":
         rows.append([KeyboardButton(text="🧑‍💼 Агент бўлиш")])
+
     if role == "admin":
         rows.append([KeyboardButton(text="📊 Админ статистика")])
+
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
@@ -431,7 +502,11 @@ async def notify_agents_about_lead(lead_id: str):
     )
 
     for agent in agents:
-        tg_id = int(agent.get("tg_id"))
+        tg_id_raw = str(agent.get("tg_id", "")).strip()
+        if not tg_id_raw.isdigit():
+            continue
+
+        tg_id = int(tg_id_raw)
         sent = await safe_send(tg_id, text, reply_markup=lead_action_kb(lead_id))
         if sent:
             msg_ids.append(f"{tg_id}:{sent.message_id}")
@@ -450,10 +525,16 @@ async def close_other_messages(lead: Dict[str, Any], except_agent_id: Optional[i
             chat_id_str, message_id_str = item.split(":")
             chat_id = int(chat_id_str)
             message_id = int(message_id_str)
+
             if except_agent_id and chat_id == except_agent_id:
                 continue
+
             try:
-                await bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
+                await bot.edit_message_reply_markup(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    reply_markup=None,
+                )
             except TelegramBadRequest:
                 pass
         except Exception:
@@ -484,8 +565,10 @@ async def cmd_start(message: Message, command: CommandObject):
         f"{settings.company_name} ботга хуш келибсиз.\n"
         f"Қуйидаги менюлардан бирини танланг."
     )
+
     if ref_by:
         text += "\n\n🤝 Сиз махсус агент ҳаволаси орқали кирдингиз."
+
     await message.answer(text, reply_markup=main_menu(role))
 
 
@@ -531,6 +614,7 @@ async def admin_stats_button(message: Message):
 @dp.message(F.text == "🧑‍💼 Агент бўлиш")
 async def request_agent_role(message: Message):
     user = await db.get_user(message.from_user.id)
+
     if user and user.get("role") == "agent" and user.get("status") == "active":
         return await message.answer("Сиз аллақачон актив агентсиз.")
 
@@ -542,6 +626,7 @@ async def request_agent_role(message: Message):
         status="pending",
         ref_by=user.get("ref_by", "") if user else "",
     )
+
     await message.answer("Сўров юборилди. Админ тасдиғидан кейин агент бўласиз.")
     await notify_admins(
         "🧑‍💼 <b>Янги агент сўрови</b>\n\n"
@@ -559,6 +644,7 @@ async def approve_agent(call: CallbackQuery):
 
     tg_id = int(call.data.split(":", 1)[1])
     user = await db.get_user(tg_id)
+
     if not user:
         return await call.answer("Фойдаланувчи топилмади", show_alert=True)
 
@@ -655,6 +741,7 @@ async def lead_notes(message: Message, state: FSMContext):
         f"✅ Заявкангиз қабул қилинди. ID: <b>{lead_id}</b>\nТез орада агент сиз билан боғланади.",
         reply_markup=main_menu(user.get("role") if user else "client"),
     )
+
     await notify_agents_about_lead(lead_id)
     await notify_admins(f"📥 Янги лид яратилди: <b>{lead_id}</b>")
 
@@ -663,6 +750,7 @@ async def lead_notes(message: Message, state: FSMContext):
 async def take_lead(call: CallbackQuery):
     lead_id = call.data.split(":", 1)[1]
     lead = await db.get_lead(lead_id)
+
     if not lead:
         return await call.answer("Лид топилмади", show_alert=True)
 
@@ -686,6 +774,7 @@ async def take_lead(call: CallbackQuery):
         pass
 
     await call.answer("Лид сизга бириктирилди")
+
     client_tg_id = str(lead.get("client_tg_id") or "").strip()
     if client_tg_id.isdigit():
         await safe_send(
@@ -698,6 +787,7 @@ async def take_lead(call: CallbackQuery):
 async def reject_lead(call: CallbackQuery):
     lead_id = call.data.split(":", 1)[1]
     lead = await db.get_lead(lead_id)
+
     if not lead:
         return await call.answer("Лид топилмади", show_alert=True)
 
@@ -718,6 +808,7 @@ async def reject_lead(call: CallbackQuery):
 async def finish_lead(call: CallbackQuery):
     lead_id = call.data.split(":", 1)[1]
     lead = await db.get_lead(lead_id)
+
     if not lead:
         return await call.answer("Лид топилмади", show_alert=True)
 
@@ -748,15 +839,12 @@ async def start_object(message: Message):
     if role not in ("agent", "admin"):
         return await message.answer("Бу функция фақат агент ва админ учун.")
 
-    appsheet_link = settings.appsheet_url
-
     text = (
         "🏠 <b>Объект қўшиш</b>\n\n"
         "Қуйидаги AppSheet линк орқали объект маълумотларини киритинг:\n\n"
-        f"{appsheet_link}\n\n"
+        f"{settings.appsheet_url}\n\n"
         "✅ Объект сақлангач, у базага тушади ва автомат постга юборилади."
     )
-
     await message.answer(text, disable_web_page_preview=True)
 
 

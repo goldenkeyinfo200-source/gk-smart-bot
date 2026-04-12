@@ -24,6 +24,7 @@ def _load_service_account_info() -> Dict[str, Any]:
 class Settings:
     bot_token: str
     spreadsheet_url: str
+    properties_spreadsheet_url: str
     service_account_info: Dict[str, Any]
     admins: List[int]
     company_name: str
@@ -34,6 +35,7 @@ class Settings:
 settings = Settings(
     bot_token=os.getenv("BOT_TOKEN", "").strip(),
     spreadsheet_url=os.getenv("SPREADSHEET_URL", "").strip(),
+    properties_spreadsheet_url=os.getenv("PROPERTIES_SPREADSHEET_URL", "").strip(),
     service_account_info=_load_service_account_info(),
     admins=_parse_admin_ids(os.getenv("ADMIN_IDS", "")),
     company_name=os.getenv("COMPANY_NAME", "Golden Key"),
@@ -47,10 +49,13 @@ settings = Settings(
 
 def validate_settings() -> None:
     missing = []
+
     if not settings.bot_token:
         missing.append("BOT_TOKEN")
     if not settings.spreadsheet_url:
         missing.append("SPREADSHEET_URL")
+    if not settings.properties_spreadsheet_url:
+        missing.append("PROPERTIES_SPREADSHEET_URL")
     if not settings.service_account_info:
         missing.append("GOOGLE_CREDENTIALS_JSON")
     if not settings.admins:
