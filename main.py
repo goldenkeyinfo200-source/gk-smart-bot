@@ -61,16 +61,8 @@ class SearchForm(StatesGroup):
     keyword = State()
 
 
-@dataclass
-class UserRow:
-    tg_id: int
-    full_name: str
-    username: str
-    phone: str
-    role: str
-    status: str
-    ref_by: str
-    joined_at: str
+class ObjectInterestForm(StatesGroup):
+    phone = State()
 
 
 def now_str() -> str:
@@ -210,6 +202,9 @@ class SheetDB:
                 "assigned_message_ids",
                 "ref_by",
                 "completed_at",
+                "object_id",
+                "lead_type",
+                "contract_signed_at",
             ],
         )
 
@@ -234,6 +229,8 @@ class SheetDB:
                 "Purpose",
                 "street_raw",
                 "street_normalized",
+                "house_number",
+                "apartment_number",
                 "Address",
                 "district",
                 "Rooms",
@@ -278,7 +275,6 @@ class SheetDB:
         existing = ws.row_values(1)
         if not existing:
             ws.append_row(headers)
-
         return ws
 
     async def get_user(self, tg_id: int) -> Optional[Dict[str, Any]]:
@@ -358,17 +354,34 @@ class SheetDB:
                 self.users_ws.update(f"A{idx}:{end_col}{idx}", [row[:len(headers)]])
                 return
 
-    async def list_agents(self, active_only: bool = True) -> List[Dict[str, Any]]:
-        return await asyncio.to_thread(self._list_agents_sync, active_only)
+    async def list_agents_and_admins(self, active_only: bool = True) -> List[Dict[str, Any]]:
+        return await asyncio.to_thread(self._list_agents_and_admins_sync, active_only)
 
-    def _list_agents_sync(self, active_only: bool) -> List[Dict[str, Any]]:
+    def _list_agents_and_admins_sync(self, active_only: bool) -> List[Dict[str, Any]]:
         records = self.users_ws.get_all_records()
         out = []
+
         for row in records:
-            if row.get("role") == "agent":
-                if active_only and row.get("status") != "active":
+            role = row.get("role")
+            status = row.get("status")
+            if role in ("agent", "admin"):
+                if active_only and status != "active":
                     continue
                 out.append(row)
+
+        for admin_id in settings.admins:
+            found = any(str(x.get("tg_id", "")).strip() == str(admin_id) for x in out)
+            if not found:
+                out.append(
+                    {
+                        "tg_id": str(admin_id),
+                        "full_name": f"Admin {admin_id}",
+                        "username": "",
+                        "phone": "",
+                        "role": "admin",
+                        "status": "active",
+                    }
+                )
         return out
 
     async def search_objects(self, keyword: str) -> List[Dict[str, Any]]:
@@ -400,7 +413,8 @@ class SheetDB:
                 row.get("Price", ""),
                 row.get("street_raw", ""),
                 row.get("street_normalized", ""),
-                row.get("owner_name", ""),
+                row.get("house_number", ""),
+                row.get("apartment_number", ""),
                 row.get("created_by_agent_name", ""),
             ]
 
@@ -450,6 +464,9 @@ class SheetDB:
             "",
             data.get("ref_by", ""),
             "",
+            data.get("object_id", ""),
+            data.get("lead_type", ""),
+            "",
         ]
         self.leads_ws.append_row(row)
         return lead_id
@@ -488,6 +505,32 @@ class SheetDB:
                         row[headers.index(key)] = str(value)
                 end_col = chr(64 + len(headers))
                 self.leads_ws.update(f"A{idx}:{end_col}{idx}", [row[:len(headers)]])
+                return
+
+    async def get_property(self, object_id: str) -> Optional[Dict[str, Any]]:
+        return await asyncio.to_thread(self._get_property_sync, object_id)
+
+    def _get_property_sync(self, object_id: str) -> Optional[Dict[str, Any]]:
+        for row in self.objects_ws.get_all_records():
+            if str(row.get("ID", "")).strip() == str(object_id).strip():
+                return row
+        return None
+
+    async def update_property(self, object_id: str, **fields):
+        await asyncio.to_thread(self._update_property_sync, object_id, fields)
+
+    def _update_property_sync(self, object_id: str, fields: Dict[str, Any]):
+        headers = self.objects_ws.row_values(1)
+        all_values = self.objects_ws.get_all_values()
+
+        for idx, row in enumerate(all_values[1:], start=2):
+            row = row + [""] * (len(headers) - len(row))
+            if str(row[0]).strip() == str(object_id).strip():
+                for key, value in fields.items():
+                    if key in headers:
+                        row[headers.index(key)] = str(value)
+                end_col = chr(64 + len(headers))
+                self.objects_ws.update(f"A{idx}:{end_col}{idx}", [row[:len(headers)]])
                 return
 
     async def stats(self) -> Dict[str, int]:
@@ -541,10 +584,22 @@ def purpose_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, one_time_keyboard=True)
 
 
-def build_lead_text(lead_id: str, name: str, phone: str, purpose: str, notes: str, ref_by: str = "") -> str:
+def build_lead_text(
+    lead_id: str,
+    name: str,
+    phone: str,
+    purpose: str,
+    notes: str,
+    object_id: str = "",
+    ref_by: str = "",
+) -> str:
     text = (
         f"🆕 <b>Янги лид</b>\n\n"
-        f"🆔 ID: <b>{lead_id}</b>\n"
+        f"🆔 Lead ID: <b>{lead_id}</b>\n"
+    )
+    if object_id:
+        text += f"🏠 Object ID: <b>{object_id}</b>\n"
+    text += (
         f"👤 Исм: {name}\n"
         f"📞 Телефон: {phone}\n"
         f"🎯 Мақсад: {purpose}\n"
@@ -561,6 +616,7 @@ def lead_action_kb(lead_id: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="✅ Олдим", callback_data=f"lead_take:{lead_id}")],
             [InlineKeyboardButton(text="❌ Рад этдим", callback_data=f"lead_reject:{lead_id}")],
             [InlineKeyboardButton(text="🏁 Бажарилди", callback_data=f"lead_done:{lead_id}")],
+            [InlineKeyboardButton(text="📄 Шартнома тузилди", callback_data=f"lead_contract:{lead_id}")],
         ]
     )
 
@@ -595,24 +651,25 @@ async def notify_admins(text: str, reply_markup: Optional[InlineKeyboardMarkup] 
         await safe_send(admin_id, text, reply_markup=reply_markup)
 
 
-async def notify_agents_about_lead(lead_id: str):
+async def notify_agents_and_admins_about_lead(lead_id: str):
     lead = await db.get_lead(lead_id)
     if not lead:
         return
 
-    agents = await db.list_agents(active_only=True)
+    recipients = await db.list_agents_and_admins(active_only=True)
     msg_ids = []
     text = build_lead_text(
-        lead_id,
-        lead.get("client_name", ""),
-        lead.get("client_phone", ""),
-        lead.get("purpose", ""),
-        lead.get("notes", ""),
-        lead.get("ref_by", ""),
+        lead_id=lead_id,
+        name=lead.get("client_name", ""),
+        phone=lead.get("client_phone", ""),
+        purpose=lead.get("purpose", ""),
+        notes=lead.get("notes", ""),
+        object_id=lead.get("object_id", ""),
+        ref_by=lead.get("ref_by", ""),
     )
 
-    for agent in agents:
-        tg_id_raw = str(agent.get("tg_id", "")).strip()
+    for person in recipients:
+        tg_id_raw = str(person.get("tg_id", "")).strip()
         if not tg_id_raw.isdigit():
             continue
 
@@ -652,10 +709,15 @@ async def close_other_messages(lead: Dict[str, Any], except_agent_id: Optional[i
 
 
 @dp.message(Command("start"))
-async def cmd_start(message: Message, command: CommandObject):
+async def cmd_start(message: Message, command: CommandObject, state: FSMContext):
     ref_by = ""
-    if command.args and command.args.startswith("ref_"):
-        ref_by = command.args.replace("ref_", "", 1)
+    object_id = ""
+
+    if command.args:
+        if command.args.startswith("ref_"):
+            ref_by = command.args.replace("ref_", "", 1)
+        elif command.args.startswith("obj_"):
+            object_id = command.args.replace("obj_", "", 1)
 
     existing = await db.get_user(message.from_user.id)
     role = "admin" if message.from_user.id in settings.admins else (existing.get("role") if existing else "client")
@@ -669,6 +731,20 @@ async def cmd_start(message: Message, command: CommandObject):
         status=status,
         ref_by=ref_by,
     )
+
+    if object_id:
+        prop = await db.get_property(object_id)
+        if not prop:
+            return await message.answer("Ушбу объект топилмади ёки фаол эмас.")
+
+        await state.set_state(ObjectInterestForm.phone)
+        await state.update_data(object_id=object_id)
+        await message.answer(
+            f"🏠 Сиз <b>{object_id}</b> объектга қизиқиш билдирдингиз.\n\n"
+            "Телефон рақамингизни юборинг:",
+            reply_markup=phone_kb(),
+        )
+        return
 
     text = (
         f"Ассалому алайкум, <b>{message.from_user.full_name}</b>!\n\n"
@@ -843,17 +919,101 @@ async def lead_notes(message: Message, state: FSMContext):
             "purpose": data.get("purpose"),
             "notes": notes,
             "ref_by": user.get("ref_by", "") if user else "",
+            "object_id": "",
+            "lead_type": "manual",
         }
     )
 
     await state.clear()
     await message.answer(
-        f"✅ Заявкангиз қабул қилинди. ID: <b>{lead_id}</b>\nТез орада агент сиз билан боғланади.",
+        f"✅ Заявкангиз қабул қилинди. ID: <b>{lead_id}</b>\nТез орада агент ёки админ сиз билан боғланади.",
         reply_markup=main_menu(user.get("role") if user else "client"),
     )
 
-    await notify_agents_about_lead(lead_id)
+    await notify_agents_and_admins_about_lead(lead_id)
     await notify_admins(f"📥 Янги лид яратилди: <b>{lead_id}</b>")
+
+
+@dp.message(ObjectInterestForm.phone, F.contact)
+async def object_interest_phone_contact(message: Message, state: FSMContext):
+    data = await state.get_data()
+    object_id = data.get("object_id", "")
+    phone = message.contact.phone_number
+
+    await db.upsert_user(
+        tg_id=message.from_user.id,
+        full_name=message.from_user.full_name,
+        username=message.from_user.username or "",
+        phone=phone,
+        role="client",
+        status="active",
+    )
+
+    lead_id = await db.create_lead(
+        {
+            "client_tg_id": message.from_user.id,
+            "client_name": message.from_user.full_name,
+            "client_phone": phone,
+            "purpose": f"Объектга қизиқиш: {object_id}",
+            "notes": f"Пост орқали қизиқди. Object ID: {object_id}",
+            "ref_by": "",
+            "object_id": object_id,
+            "lead_type": "object_interest",
+        }
+    )
+
+    await state.clear()
+    await message.answer(
+        f"✅ Сўров юборилди.\nОбъект: <b>{object_id}</b>\nЛид ID: <b>{lead_id}</b>\nТез орада агент ёки админ боғланади.",
+        reply_markup=main_menu("client"),
+    )
+    await message.answer(
+        "Қўшимча равишда, сизга шу объектга ўхшаш бошқа вариантлар ҳам таклиф қилинади. "
+        "Менюдаги 🔎 Объект қидириш орқали яна вариантлар кўришингиз мумкин."
+    )
+
+    await notify_agents_and_admins_about_lead(lead_id)
+
+
+@dp.message(ObjectInterestForm.phone)
+async def object_interest_phone_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    object_id = data.get("object_id", "")
+    phone = message.text.strip()
+
+    await db.upsert_user(
+        tg_id=message.from_user.id,
+        full_name=message.from_user.full_name,
+        username=message.from_user.username or "",
+        phone=phone,
+        role="client",
+        status="active",
+    )
+
+    lead_id = await db.create_lead(
+        {
+            "client_tg_id": message.from_user.id,
+            "client_name": message.from_user.full_name,
+            "client_phone": phone,
+            "purpose": f"Объектга қизиқиш: {object_id}",
+            "notes": f"Пост орқали қизиқди. Object ID: {object_id}",
+            "ref_by": "",
+            "object_id": object_id,
+            "lead_type": "object_interest",
+        }
+    )
+
+    await state.clear()
+    await message.answer(
+        f"✅ Сўров юборилди.\nОбъект: <b>{object_id}</b>\nЛид ID: <b>{lead_id}</b>\nТез орада агент ёки админ боғланади.",
+        reply_markup=main_menu("client"),
+    )
+    await message.answer(
+        "Қўшимча равишда, сизга шу объектга ўхшаш бошқа вариантлар ҳам таклиф қилинади. "
+        "Менюдаги 🔎 Объект қидириш орқали яна вариантлар кўришингиз мумкин."
+    )
+
+    await notify_agents_and_admins_about_lead(lead_id)
 
 
 @dp.callback_query(F.data.startswith("lead_take:"))
@@ -864,11 +1024,11 @@ async def take_lead(call: CallbackQuery):
     if not lead:
         return await call.answer("Лид топилмади", show_alert=True)
 
-    if lead.get("status") == "done":
+    if lead.get("status") in ("done", "contract_signed"):
         return await call.answer("Бу лид якунланган", show_alert=True)
 
     if lead.get("assigned_agent_id") and str(lead.get("assigned_agent_id")) != str(call.from_user.id):
-        return await call.answer("Бу лидни бошқа агент олган", show_alert=True)
+        return await call.answer("Бу лидни бошқа ходим олган", show_alert=True)
 
     await db.update_lead(
         lead_id,
@@ -889,7 +1049,7 @@ async def take_lead(call: CallbackQuery):
     if client_tg_id.isdigit():
         await safe_send(
             int(client_tg_id),
-            f"✅ Сизнинг заявкангиз агент <b>{call.from_user.full_name}</b> га бириктирилди. Яқин орада сиз билан боғланишади.",
+            f"✅ Сизнинг сўровингиз <b>{call.from_user.full_name}</b> га бириктирилди. Яқин орада сиз билан боғланишади.",
         )
 
 
@@ -901,7 +1061,8 @@ async def reject_lead(call: CallbackQuery):
     if not lead:
         return await call.answer("Лид топилмади", show_alert=True)
 
-    if str(lead.get("assigned_agent_id") or "") not in ("", str(call.from_user.id)):
+    assigned_id = str(lead.get("assigned_agent_id") or "").strip()
+    if assigned_id not in ("", str(call.from_user.id)):
         return await call.answer("Бу лид сизга тегишли эмас", show_alert=True)
 
     await db.update_lead(
@@ -909,9 +1070,10 @@ async def reject_lead(call: CallbackQuery):
         status="new",
         assigned_agent_id="",
         assigned_agent_name="",
+        assigned_message_ids="",
     )
-    await call.answer("Лид қайта очилди")
-    await notify_agents_about_lead(lead_id)
+    await call.answer("Лид қайта очилди ва барчага қайта юборилади")
+    await notify_agents_and_admins_about_lead(lead_id)
 
 
 @dp.callback_query(F.data.startswith("lead_done:"))
@@ -922,8 +1084,8 @@ async def finish_lead(call: CallbackQuery):
     if not lead:
         return await call.answer("Лид топилмади", show_alert=True)
 
-    if str(lead.get("assigned_agent_id") or "") != str(call.from_user.id):
-        return await call.answer("Фақат лидни олган агент якунлай олади", show_alert=True)
+    if str(lead.get("assigned_agent_id") or "").strip() != str(call.from_user.id):
+        return await call.answer("Фақат лидни олган ходим якунлай олади", show_alert=True)
 
     await db.update_lead(lead_id, status="done", completed_at=now_str())
     await close_other_messages(lead)
@@ -931,13 +1093,53 @@ async def finish_lead(call: CallbackQuery):
 
     client_tg_id = str(lead.get("client_tg_id") or "").strip()
     if client_tg_id.isdigit():
-        await safe_send(int(client_tg_id), "🏁 Сизнинг мурожаатингиз якунланди. Раҳмат!")
+        await safe_send(
+            int(client_tg_id),
+            "🏁 Сизнинг мурожаатингиз якунланди. Раҳмат. Қўшимча вариантлар керак бўлса бот орқали ёзиб қолдиринг.",
+        )
 
     ref_by = str(lead.get("ref_by") or "").strip()
     if ref_by.isdigit():
         await safe_send(
             int(ref_by),
             "🎁 Сиз юборган мижознинг иши якунланди. Бонусингизни офисдан олиб кетишингиз мумкин.",
+        )
+
+
+@dp.callback_query(F.data.startswith("lead_contract:"))
+async def sign_contract(call: CallbackQuery):
+    lead_id = call.data.split(":", 1)[1]
+    lead = await db.get_lead(lead_id)
+
+    if not lead:
+        return await call.answer("Лид топилмади", show_alert=True)
+
+    if str(lead.get("assigned_agent_id") or "").strip() != str(call.from_user.id):
+        return await call.answer("Фақат лидни олган ходим шартнома тугмасини босиши мумкин", show_alert=True)
+
+    object_id = str(lead.get("object_id") or "").strip()
+    if not object_id:
+        return await call.answer("Бу лид объект билан боғланмаган", show_alert=True)
+
+    await db.update_lead(
+        lead_id,
+        status="contract_signed",
+        completed_at=now_str(),
+        contract_signed_at=now_str(),
+    )
+    await db.update_property(
+        object_id,
+        Status="sold",
+        post_status="archived",
+    )
+    await close_other_messages(lead)
+    await call.answer("Шартнома тузилди, объект архивга ўтказилди")
+
+    client_tg_id = str(lead.get("client_tg_id") or "").strip()
+    if client_tg_id.isdigit():
+        await safe_send(
+            int(client_tg_id),
+            f"📄 Табриклаймиз! <b>{object_id}</b> объект бўйича шартнома расмийлаштирилди.",
         )
 
 
