@@ -1,4 +1,5 @@
 import asyncio
+import difflib
 import logging
 import os
 import re
@@ -72,13 +73,93 @@ class UserRow:
     joined_at: str
 
 
+def now_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def normalize_text(text: str) -> str:
+    if text is None:
+        return ""
+
+    t = str(text).lower().strip()
+
+    custom_fixes = {
+        "хукандий": "ҳўқандий",
+        "хуканди": "ҳўқанди",
+        "хуканд": "ҳўқанд",
+        "куканд": "қўқон",
+        "коканд": "қўқон",
+        "кўкон": "қўқон",
+        "қуқон": "қўқон",
+        "қукон": "қўқон",
+        "qoqon": "қўқон",
+        "qoqan": "қўқон",
+        "kokand": "қўқон",
+        "kokon": "қўқон",
+        "kukand": "қўқон",
+        "fargona": "фарғона",
+        "fergana": "фарғона",
+        "andijon": "андижон",
+        "andijan": "андижон",
+        "namangan": "наманган",
+        "toshkent": "тошкент",
+        "tashkent": "тошкент",
+        "ipoteka": "ипотека",
+        "kvartira": "квартира",
+        "xona": "хона",
+        "xonali": "хонали",
+        "xonadon": "хонадон",
+        "uy": "уй",
+        "hovli": "ҳовли",
+        "dom": "уй",
+        "moljal": "мўлжал",
+        "mo'ljal": "мўлжал",
+        "mo‘ljal": "мўлжал",
+        "manzil": "манзил",
+        "arenda": "ижара",
+        "sotuv": "сотиш",
+        "sotiladi": "сотиш",
+        "ijara": "ижара",
+        "ijaraga": "ижара",
+    }
+
+    replacements = {
+        "o‘": "ў",
+        "o'": "ў",
+        "g‘": "ғ",
+        "g'": "ғ",
+        "sh": "ш",
+        "ch": "ч",
+        "yo": "ё",
+        "yu": "ю",
+        "ya": "я",
+        "q": "қ",
+    }
+
+    for old, new in custom_fixes.items():
+        t = t.replace(old, new)
+
+    for old, new in replacements.items():
+        t = t.replace(old, new)
+
+    t = re.sub(r"[^a-zA-Zа-яА-ЯёЁқҚғҒҳҲўЎ0-9\s]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def similarity(a: str, b: str) -> float:
+    a_norm = normalize_text(a)
+    b_norm = normalize_text(b)
+    if not a_norm or not b_norm:
+        return 0.0
+    return difflib.SequenceMatcher(None, a_norm, b_norm).ratio()
+
+
 class SheetDB:
     def __init__(self):
         self.gc = None
-
         self.main_sh = None
         self.props_sh = None
-
         self.users_ws = None
         self.leads_ws = None
         self.settings_ws = None
@@ -94,10 +175,7 @@ class SheetDB:
         )
         self.gc = gspread.authorize(creds)
 
-        # 1-шит: Users / Leads / Settings
         self.main_sh = self.gc.open_by_url(settings.spreadsheet_url)
-
-        # 2-шит: Properties
         self.props_sh = self.gc.open_by_url(settings.properties_spreadsheet_url)
 
         self.users_ws = self._get_or_create_ws(
@@ -209,7 +287,7 @@ class SheetDB:
     def _get_user_sync(self, tg_id: int) -> Optional[Dict[str, Any]]:
         records = self.users_ws.get_all_records()
         for row in records:
-            if str(row.get("tg_id", "")) == str(tg_id):
+            if str(row.get("tg_id", "")).strip() == str(tg_id):
                 return row
         return None
 
@@ -249,7 +327,7 @@ class SheetDB:
         new_row = [str(tg_id), full_name, username, phone, role, status, ref_by, joined_at]
 
         for idx, row in enumerate(all_values[1:], start=2):
-            if str(row[0]) == str(tg_id):
+            if str(row[0]).strip() == str(tg_id):
                 current = row + [""] * (8 - len(row))
                 current[1] = full_name or current[1]
                 current[2] = username or current[2]
@@ -271,7 +349,7 @@ class SheetDB:
         all_values = self.users_ws.get_all_values()
 
         for idx, row in enumerate(all_values[1:], start=2):
-            if str(row[0]) == str(tg_id):
+            if str(row[0]).strip() == str(tg_id):
                 row = row + [""] * (len(headers) - len(row))
                 for key, value in fields.items():
                     if key in headers:
@@ -286,33 +364,71 @@ class SheetDB:
     def _list_agents_sync(self, active_only: bool) -> List[Dict[str, Any]]:
         records = self.users_ws.get_all_records()
         out = []
-
         for row in records:
             if row.get("role") == "agent":
                 if active_only and row.get("status") != "active":
                     continue
                 out.append(row)
-
         return out
 
     async def search_objects(self, keyword: str) -> List[Dict[str, Any]]:
         return await asyncio.to_thread(self._search_objects_sync, keyword)
 
     def _search_objects_sync(self, keyword: str) -> List[Dict[str, Any]]:
-        k = keyword.lower().strip()
+        k = normalize_text(keyword)
         records = self.objects_ws.get_all_records()
         results = []
 
         for row in records:
-            hay = " ".join(str(v) for v in row.values()).lower()
-
             status = str(row.get("Status", "")).strip().lower()
             if status not in ("pending", "active", "ready", ""):
                 continue
 
-            if k in hay:
+            searchable_fields = [
+                row.get("ID", ""),
+                row.get("Address", ""),
+                row.get("district", ""),
+                row.get("Landmark", ""),
+                row.get("description", ""),
+                row.get("property_type", ""),
+                row.get("Purpose", ""),
+                row.get("ownership", ""),
+                row.get("Mortgage", ""),
+                row.get("Rooms", ""),
+                row.get("Floor", ""),
+                row.get("Area", ""),
+                row.get("Price", ""),
+                row.get("street_raw", ""),
+                row.get("street_normalized", ""),
+                row.get("owner_name", ""),
+                row.get("created_by_agent_name", ""),
+            ]
+
+            combined = " ".join(str(x) for x in searchable_fields if x is not None)
+            combined_norm = normalize_text(combined)
+
+            score = 0.0
+
+            if k and k in combined_norm:
+                score = max(score, 1.0)
+
+            for field in searchable_fields:
+                sim = similarity(k, str(field or ""))
+                if sim > score:
+                    score = sim
+
+            tokens = [x for x in k.split() if x]
+            if tokens:
+                token_hits = sum(1 for token in tokens if token in combined_norm)
+                token_score = token_hits / len(tokens)
+                if token_score > score:
+                    score = token_score
+
+            if score >= 0.45:
+                row["_score"] = round(score, 3)
                 results.append(row)
 
+        results.sort(key=lambda x: x.get("_score", 0), reverse=True)
         return results[:20]
 
     async def create_lead(self, data: Dict[str, Any]) -> str:
@@ -341,13 +457,11 @@ class SheetDB:
     def _next_lead_id(self) -> str:
         records = self.leads_ws.get_all_records()
         max_num = 0
-
         for row in records:
             lid = str(row.get("lead_id", ""))
             m = re.match(r"LD-(\d+)", lid)
             if m:
                 max_num = max(max_num, int(m.group(1)))
-
         return f"LD-{max_num + 1:03d}"
 
     async def get_lead(self, lead_id: str) -> Optional[Dict[str, Any]]:
@@ -394,10 +508,6 @@ class SheetDB:
             "done_leads": sum(1 for x in leads if x.get("status") == "done"),
             "objects": len(objects),
         }
-
-
-def now_str() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def phone_kb() -> ReplyKeyboardMarkup:
@@ -867,7 +977,10 @@ async def do_search(message: Message, state: FSMContext):
     role = "admin" if message.from_user.id in settings.admins else (user.get("role") if user else "client")
 
     if not results:
-        return await message.answer("Ҳеч нарса топилмади.", reply_markup=main_menu(role))
+        return await message.answer(
+            "Ҳеч нарса топилмади.\nБошқача ёзиб кўринг: манзил, туман, хона сони, ипотека, ID.",
+            reply_markup=main_menu(role),
+        )
 
     is_full = role in ("agent", "admin")
 
@@ -887,6 +1000,7 @@ async def do_search(message: Message, state: FSMContext):
         property_type = row.get("property_type", "")
         description = row.get("description", "")
         status = row.get("Status", "")
+        score = row.get("_score", "")
 
         if is_full:
             text = (
@@ -904,7 +1018,8 @@ async def do_search(message: Message, state: FSMContext):
                 f"💰 Бош тўлов: {initial_payment}\n"
                 f"🏷 Тури: {property_type}\n"
                 f"📝 Тавсиф: {description}\n"
-                f"📌 Статус: {status}"
+                f"📌 Статус: {status}\n"
+                f"🤖 Мослик: {score}"
             )
         else:
             text = (
