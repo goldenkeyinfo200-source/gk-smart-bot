@@ -105,29 +105,7 @@ class SheetDB:
                 "joined_at",
             ],
         )
-        self.objects_ws = self._get_or_create_ws(
-            "Objects",
-            [
-                "object_id",
-                "created_at",
-                "created_by",
-                "created_by_name",
-                "status",
-                "address",
-                "floor",
-                "rooms",
-                "ownership",
-                "area",
-                "purpose",
-                "price",
-                "photo",
-                "landmark",
-                "mortgage",
-                "down_payment",
-                "property_type",
-                "description",
-            ],
-        )
+
         self.leads_ws = self._get_or_create_ws(
             "Leads",
             [
@@ -146,7 +124,11 @@ class SheetDB:
                 "completed_at",
             ],
         )
+
         self.settings_ws = self._get_or_create_ws("Settings", ["key", "value"])
+
+        # AppSheet ва Apps Script ишлатаётган асосий объектлар варағи
+        self.objects_ws = self.sh.worksheet("Properties")
 
     def _get_or_create_ws(self, title: str, headers: List[str]):
         try:
@@ -257,10 +239,17 @@ class SheetDB:
         k = keyword.lower().strip()
         records = self.objects_ws.get_all_records()
         results = []
+
         for row in records:
             hay = " ".join(str(v) for v in row.values()).lower()
-            if k in hay and row.get("status") in ("pending", "active", "ready"):
+
+            status = str(row.get("Status", "")).strip().lower()
+            if status not in ("pending", "active", "ready", ""):
+                continue
+
+            if k in hay:
                 results.append(row)
+
         return results[:20]
 
     async def create_lead(self, data: Dict[str, Any]) -> str:
@@ -741,7 +730,7 @@ async def finish_lead(call: CallbackQuery):
 
     client_tg_id = str(lead.get("client_tg_id") or "").strip()
     if client_tg_id.isdigit():
-        await safe_send(client_tg_id and int(client_tg_id), "🏁 Сизнинг мурожаатингиз якунланди. Раҳмат!")
+        await safe_send(int(client_tg_id), "🏁 Сизнинг мурожаатингиз якунланди. Раҳмат!")
 
     ref_by = str(lead.get("ref_by") or "").strip()
     if ref_by.isdigit():
@@ -765,7 +754,7 @@ async def start_object(message: Message):
         "🏠 <b>Объект қўшиш</b>\n\n"
         "Қуйидаги AppSheet линк орқали объект маълумотларини киритинг:\n\n"
         f"{appsheet_link}\n\n"
-        "✅ Объект сақлангач, у Project 2 орқали базага тушади ва автомат постга юборилади."
+        "✅ Объект сақлангач, у базага тушади ва автомат постга юборилади."
     )
 
     await message.answer(text, disable_web_page_preview=True)
@@ -793,40 +782,58 @@ async def do_search(message: Message, state: FSMContext):
         return await message.answer("Ҳеч нарса топилмади.", reply_markup=main_menu(role))
 
     is_full = role in ("agent", "admin")
+
     for row in results[:10]:
+        id_ = row.get("ID", "")
+        address = row.get("Address", "")
+        floor = row.get("Floor", "")
+        rooms = row.get("Rooms", "")
+        ownership = row.get("ownership", "")
+        area = row.get("Area", "")
+        purpose = row.get("Purpose", "")
+        price = row.get("Price", "")
+        photo_1 = row.get("photo_1", "")
+        landmark = row.get("Landmark", "")
+        mortgage = row.get("Mortgage", "")
+        initial_payment = row.get("InitialPayment", "")
+        property_type = row.get("property_type", "")
+        description = row.get("description", "")
+        status = row.get("Status", "")
+
         if is_full:
             text = (
-                f"🏠 <b>{row.get('object_id')}</b>\n"
-                f"📍 Манзил: {row.get('address')}\n"
-                f"🏢 Қават: {row.get('floor')}\n"
-                f"🛏 Хоналар: {row.get('rooms')}\n"
-                f"📜 Мулкчилик: {row.get('ownership')}\n"
-                f"📐 Майдон: {row.get('area')}\n"
-                f"🎯 Мақсад: {row.get('purpose')}\n"
-                f"💵 Нарх: {row.get('price')}\n"
-                f"🖼 Фото: {row.get('photo')}\n"
-                f"📌 Мўлжал: {row.get('landmark')}\n"
-                f"🏦 Ипотека: {row.get('mortgage')}\n"
-                f"💰 Бош тўлов: {row.get('down_payment')}\n"
-                f"🏷 Тури: {row.get('property_type')}\n"
-                f"📝 Тавсиф: {row.get('description')}\n"
-                f"📌 Статус: {row.get('status')}"
+                f"🏠 <b>{id_}</b>\n"
+                f"📍 Манзил: {address}\n"
+                f"🏢 Қават: {floor}\n"
+                f"🛏 Хоналар: {rooms}\n"
+                f"📜 Мулкчилик: {ownership}\n"
+                f"📐 Майдон: {area}\n"
+                f"🎯 Мақсад: {purpose}\n"
+                f"💵 Нарх: {price}\n"
+                f"🖼 Фото: {photo_1}\n"
+                f"📌 Мўлжал: {landmark}\n"
+                f"🏦 Ипотека: {mortgage}\n"
+                f"💰 Бош тўлов: {initial_payment}\n"
+                f"🏷 Тури: {property_type}\n"
+                f"📝 Тавсиф: {description}\n"
+                f"📌 Статус: {status}"
             )
         else:
             text = (
-                f"🏠 <b>{row.get('object_id')}</b>\n"
-                f"📍 Манзил: {row.get('address')}\n"
-                f"🏢 Қават: {row.get('floor')}\n"
-                f"🛏 Хоналар: {row.get('rooms')}\n"
-                f"📜 Мулкчилик: {row.get('ownership')}\n"
-                f"📐 Майдон: {row.get('area')}\n"
-                f"🎯 Мақсад: {row.get('purpose')}\n"
-                f"💵 Нарх: {row.get('price')}\n"
-                f"🖼 Фото: {row.get('photo')}\n"
-                f"📌 Мўлжал: {row.get('landmark')}\n"
-                f"🏦 Ипотека: {row.get('mortgage')}\n"
-                f"💰 Бош тўлов: {row.get('down_payment')}"
+                f"🏠 <b>{id_}</b>\n"
+                f"📍 Манзил: {address}\n"
+                f"🏢 Қават: {floor}\n"
+                f"🛏 Хоналар: {rooms}\n"
+                f"📜 Мулкчилик: {ownership}\n"
+                f"📐 Майдон: {area}\n"
+                f"🎯 Мақсад: {purpose}\n"
+                f"💵 Нарх: {price}\n"
+                f"🖼 Фото: {photo_1}\n"
+                f"📌 Мўлжал: {landmark}\n"
+                f"🏦 Ипотека: {mortgage}\n"
+                f"💰 Бош тўлов: {initial_payment}"
             )
+
         await message.answer(text)
 
     await message.answer("Қидирув якунланди.", reply_markup=main_menu(role))
